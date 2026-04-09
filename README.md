@@ -37,6 +37,18 @@ That writes:
 - `datasets/calibration_20_shot/derived/shot_records.parquet`
 - `datasets/shared/processed/calibration_20_shot_shot_records.parquet`
 
+Build a broader training corpus across every dataset folder that contains `annotations/athlete_profile.json` and `annotations/shots.csv`:
+
+```bash
+cd janitor_python
+source .venv/bin/activate
+jumpshot-janitor build-corpus --project-root ..
+```
+
+That writes:
+
+- `datasets/shared/processed/training_corpus.parquet`
+
 ## Athlete App
 
 Run the Rust desktop trainer:
@@ -53,7 +65,7 @@ cd athlete_rust
 cargo check
 ```
 
-When the shared Parquet exists, the Rust app will automatically load it on startup and seed the trainer from the first shot record.
+When the shared Parquet exists, the Rust app will automatically prefer `training_corpus.parquet` on startup and fall back to the calibration set if no wider corpus has been exported yet.
 
 ## What Changed
 

@@ -19,6 +19,7 @@ class AthleteProfile:
     capture_fps: int | None = None
     resolution: str | None = None
     notes: str | None = None
+    source_tier: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "AthleteProfile":

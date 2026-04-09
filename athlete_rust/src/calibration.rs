@@ -10,8 +10,9 @@ pub fn estimate_calibration(input: &CalibrationInput) -> CalibrationProfile {
     let shoulder_bonus = input.shoulder_width_m * 0.18;
     let estimated_standing_reach_m = standing_reach_from_height + shoulder_bonus;
 
+    let estimated_mount_height_m = input.body_height_m * 0.58;
     let geometric_angle =
-        ((estimated_standing_reach_m - input.camera_height_m) / input.camera_distance_m.max(0.5))
+        ((estimated_standing_reach_m - estimated_mount_height_m) / input.camera_distance_m.max(0.5))
             .atan()
             .to_degrees();
     let estimated_camera_angle_deg = geometric_angle + input.lens_tilt_deg;

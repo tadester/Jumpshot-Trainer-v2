@@ -1,2 +1,2 @@
-shot_id,session_date,fps,side_video,angle45_video,set_point_frame_side,release_frame_side,set_point_frame_45,release_frame_45,make,shot_type,distance_ft,notes
-shot_001,2026-04-08,60,shot_001_side.mp4,shot_001_45.mp4,84,88,82,87,true,jump_shot,15,template row
+shot_id,session_date,fps,side_video,angle45_video,shot_start_frame_side,set_point_frame_side,release_frame_side,shot_end_frame_side,shot_start_frame_45,set_point_frame_45,release_frame_45,shot_end_frame_45,make,shot_type,distance_ft,source_dataset,source_tier,annotation_quality,teacher_model,clip_uid,notes
+shot_001,2026-04-08,60,shot_001_side.mp4,shot_001_45.mp4,72,84,88,116,70,82,87,114,true,jump_shot,15,calibration_20_shot,gold,manual,manual_review,shot_001,template row

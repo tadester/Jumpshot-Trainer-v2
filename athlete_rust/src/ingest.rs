@@ -82,6 +82,15 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
     let release_time_ms_side = frame.column("release_time_ms_side")?;
     let release_time_ms_45 = frame.column("release_time_ms_45")?;
     let paired_view_available = frame.column("paired_view_available")?;
+    let source_dataset = frame.column("source_dataset")?;
+    let source_tier = frame.column("source_tier")?;
+    let annotation_quality = frame.column("annotation_quality")?;
+    let teacher_model = frame.column("teacher_model")?;
+    let clip_uid = frame.column("clip_uid")?;
+    let shot_start_frame_side = frame.column("shot_start_frame_side")?;
+    let shot_end_frame_side = frame.column("shot_end_frame_side")?;
+    let shot_start_frame_45 = frame.column("shot_start_frame_45")?;
+    let shot_end_frame_45 = frame.column("shot_end_frame_45")?;
 
     let mut records = Vec::with_capacity(frame.height());
     for index in 0..frame.height() {
@@ -110,6 +119,15 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
             release_time_ms_side: opt_f32_value(release_time_ms_side, index),
             release_time_ms_45: opt_f32_value(release_time_ms_45, index),
             paired_view_available: bool_value(paired_view_available, index, false),
+            source_dataset: string_value(source_dataset, index),
+            source_tier: string_value(source_tier, index),
+            annotation_quality: string_value(annotation_quality, index),
+            teacher_model: string_value(teacher_model, index),
+            clip_uid: string_value(clip_uid, index),
+            shot_start_frame_side: opt_i64_value(shot_start_frame_side, index),
+            shot_end_frame_side: opt_i64_value(shot_end_frame_side, index),
+            shot_start_frame_45: opt_i64_value(shot_start_frame_45, index),
+            shot_end_frame_45: opt_i64_value(shot_end_frame_45, index),
         });
     }
     Ok(records)

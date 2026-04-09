@@ -188,7 +188,6 @@ pub struct CalibrationInput {
     pub shoulder_width_m: f32,
     pub arm_span_ratio: f32,
     pub fingertip_reach_ratio: f32,
-    pub camera_height_m: f32,
     pub camera_distance_m: f32,
     pub lens_tilt_deg: f32,
 }
@@ -234,6 +233,15 @@ pub struct JanitorShotRecord {
     pub release_time_ms_side: Option<f32>,
     pub release_time_ms_45: Option<f32>,
     pub paired_view_available: bool,
+    pub source_dataset: String,
+    pub source_tier: String,
+    pub annotation_quality: String,
+    pub teacher_model: String,
+    pub clip_uid: String,
+    pub shot_start_frame_side: Option<i64>,
+    pub shot_end_frame_side: Option<i64>,
+    pub shot_start_frame_45: Option<i64>,
+    pub shot_end_frame_45: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

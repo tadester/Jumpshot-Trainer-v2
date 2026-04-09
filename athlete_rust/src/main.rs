@@ -66,9 +66,11 @@ impl JumpshotTrainerApp {
             feature_count: 0,
         };
 
+        let corpus_path = std::path::Path::new("../datasets/shared/processed/training_corpus.parquet");
         let parquet_path = std::path::Path::new("../datasets/shared/processed/calibration_20_shot_shot_records.parquet");
-        let (input, calibration_input, dataset_status, dataset_summary, model_readiness) = if parquet_path.exists() {
-            match load_janitor_shot_records(parquet_path) {
+        let preferred_path = if corpus_path.exists() { corpus_path } else { parquet_path };
+        let (input, calibration_input, dataset_status, dataset_summary, model_readiness) = if preferred_path.exists() {
+            match load_janitor_shot_records(preferred_path) {
                 Ok(records) if !records.is_empty() => {
                     let examples = build_training_examples(&records);
                     let summary = summarize_training_dataset(&examples);
@@ -77,7 +79,7 @@ impl JumpshotTrainerApp {
                     (
                         shot_input_from_record(first),
                         calibration_input_from_record(first),
-                        format!("Linked to janitor export at {}", parquet_path.display()),
+                        format!("Linked to janitor export at {}", preferred_path.display()),
                         summary,
                         readiness,
                     )
@@ -101,7 +103,7 @@ impl JumpshotTrainerApp {
             (
                 default_input,
                 default_calibration_input(),
-                format!("No janitor parquet yet at {}. Using local demo state.", parquet_path.display()),
+                format!("No janitor parquet yet at {}. Using local demo state.", preferred_path.display()),
                 empty_summary.clone(),
                 evaluate_model_readiness(&empty_summary),
             )
@@ -180,58 +182,59 @@ impl JumpshotTrainerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 22)))
             .show(ctx, |ui| {
-                hero_metrics(ui, &self.dataset_summary, &self.model_readiness, snapshot.inference.score);
-                ui.add_space(16.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    hero_metrics(ui, &self.dataset_summary, &self.model_readiness, snapshot.inference.score);
+                    ui.add_space(16.0);
 
-                ui.columns(2, |columns| {
-                    let (left_cols, right_cols) = columns.split_at_mut(1);
-                    let left = &mut left_cols[0];
-                    let right = &mut right_cols[0];
+                    ui.columns(2, |columns| {
+                        let (left_cols, right_cols) = columns.split_at_mut(1);
+                        let left = &mut left_cols[0];
+                        let right = &mut right_cols[0];
 
-                    section_card(left, "Calibration Deck", "Dial in athlete geometry and camera placement before the first session.", |ui| {
-                        slider(ui, &mut self.calibration_input.body_height_m, 1.45..=2.25, "Body Height");
-                        slider(ui, &mut self.calibration_input.shoulder_width_m, 0.32..=0.62, "Shoulder Width");
-                        slider(ui, &mut self.calibration_input.arm_span_ratio, 0.92..=1.12, "Arm Span Ratio");
-                        slider(ui, &mut self.calibration_input.fingertip_reach_ratio, 1.2..=1.46, "Standing Reach Ratio");
-                        slider(ui, &mut self.calibration_input.camera_height_m, 0.8..=2.2, "Camera Height");
-                        slider(ui, &mut self.calibration_input.camera_distance_m, 2.0..=8.0, "Camera Distance");
-                        slider(ui, &mut self.calibration_input.lens_tilt_deg, -10.0..=15.0, "Lens Tilt");
-                        ui.add_space(10.0);
-                        if accent_button(ui, "Lock Calibration + Open Dashboard").clicked() {
-                            self.regenerate_session();
-                            self.screen = AppScreen::Dashboard;
-                        }
+                        section_card(left, "Calibration Deck", "Dial in athlete geometry and camera placement before the first session.", |ui| {
+                            slider(ui, &mut self.calibration_input.body_height_m, 1.45..=2.25, "Body Height");
+                            slider(ui, &mut self.calibration_input.shoulder_width_m, 0.32..=0.62, "Shoulder Width");
+                            slider(ui, &mut self.calibration_input.arm_span_ratio, 0.92..=1.12, "Arm Span Ratio");
+                            slider(ui, &mut self.calibration_input.fingertip_reach_ratio, 1.2..=1.46, "Standing Reach Ratio");
+                            slider(ui, &mut self.calibration_input.camera_distance_m, 2.0..=8.0, "Camera Distance");
+                            slider(ui, &mut self.calibration_input.lens_tilt_deg, -10.0..=15.0, "Lens Tilt");
+                            ui.add_space(10.0);
+                            if accent_button(ui, "Lock Calibration + Open Dashboard").clicked() {
+                                self.regenerate_session();
+                                self.screen = AppScreen::Dashboard;
+                            }
+                        });
+
+                        section_card(right, "Athlete Geometry", "Estimated values that will be reused by the feature and training pipeline.", |ui| {
+                            metric_pair(ui, "Estimated Wingspan", &format!("{:.2} m", snapshot.calibration.estimated_wingspan_m));
+                            metric_pair(ui, "Standing Reach", &format!("{:.2} m", snapshot.calibration.estimated_standing_reach_m));
+                            metric_pair(ui, "Camera Angle", &format!("{:.1} deg", snapshot.calibration.estimated_camera_angle_deg));
+                            metric_pair(ui, "Calibration Confidence", &format!("{:.0}%", snapshot.calibration.confidence * 100.0));
+                            ui.add_space(12.0);
+                            draw_calibration_preview(ui, &self.calibration_input);
+                        });
                     });
 
-                    section_card(right, "Athlete Geometry", "Estimated values that will be reused by the feature and training pipeline.", |ui| {
-                        metric_pair(ui, "Estimated Wingspan", &format!("{:.2} m", snapshot.calibration.estimated_wingspan_m));
-                        metric_pair(ui, "Standing Reach", &format!("{:.2} m", snapshot.calibration.estimated_standing_reach_m));
-                        metric_pair(ui, "Camera Angle", &format!("{:.1} deg", snapshot.calibration.estimated_camera_angle_deg));
-                        metric_pair(ui, "Calibration Confidence", &format!("{:.0}%", snapshot.calibration.confidence * 100.0));
-                        ui.add_space(12.0);
-                        draw_calibration_preview(ui, &self.calibration_input);
-                    });
-                });
+                    ui.add_space(16.0);
+                    ui.columns(2, |columns| {
+                        let (left_cols, right_cols) = columns.split_at_mut(1);
+                        let left = &mut left_cols[0];
+                        let right = &mut right_cols[0];
 
-                ui.add_space(16.0);
-                ui.columns(2, |columns| {
-                    let (left_cols, right_cols) = columns.split_at_mut(1);
-                    let left = &mut left_cols[0];
-                    let right = &mut right_cols[0];
+                        section_card(left, "Training Readiness", "This checks whether the current dataset is strong enough for the first Rust-side training pass.", |ui| {
+                            readiness_panel(ui, &self.model_readiness);
+                        });
 
-                    section_card(left, "Training Readiness", "This checks whether the current dataset is strong enough for the first Rust-side training pass.", |ui| {
-                        readiness_panel(ui, &self.model_readiness);
-                    });
-
-                    section_card(right, "Dataset Summary", "Shared Parquet exported by the Python janitor and read directly by the Rust athlete app.", |ui| {
-                        metric_pair(ui, "Examples", &self.dataset_summary.example_count.to_string());
-                        metric_pair(ui, "Paired Views", &self.dataset_summary.paired_view_examples.to_string());
-                        metric_pair(ui, "Feature Count", &self.dataset_summary.feature_count.to_string());
-                        metric_pair(ui, "Avg Target Score", &format!("{:.0}%", self.dataset_summary.average_target_score * 100.0));
-                        ui.add_space(10.0);
-                        for (label, count) in &self.dataset_summary.label_balance {
-                            label_row(ui, *label, *count);
-                        }
+                        section_card(right, "Dataset Summary", "Shared Parquet exported by the Python janitor and read directly by the Rust athlete app.", |ui| {
+                            metric_pair(ui, "Examples", &self.dataset_summary.example_count.to_string());
+                            metric_pair(ui, "Paired Views", &self.dataset_summary.paired_view_examples.to_string());
+                            metric_pair(ui, "Feature Count", &self.dataset_summary.feature_count.to_string());
+                            metric_pair(ui, "Avg Target Score", &format!("{:.0}%", self.dataset_summary.average_target_score * 100.0));
+                            ui.add_space(10.0);
+                            for (label, count) in &self.dataset_summary.label_balance {
+                                label_row(ui, *label, *count);
+                            }
+                        });
                     });
                 });
             });
@@ -679,7 +682,8 @@ fn draw_calibration_preview(ui: &mut egui::Ui, calibration_input: &CalibrationIn
     let head_y = floor_y - body_h;
     let shoulder_half = calibration_input.shoulder_width_m * 90.0;
     let cam_x = rect.right() - 74.0;
-    let cam_y = floor_y - calibration_input.camera_height_m * 72.0;
+    let estimated_mount_height_m = calibration_input.body_height_m * 0.58;
+    let cam_y = floor_y - estimated_mount_height_m * 72.0;
 
     painter.line_segment(
         [egui::pos2(athlete_x, floor_y), egui::pos2(athlete_x, head_y)],

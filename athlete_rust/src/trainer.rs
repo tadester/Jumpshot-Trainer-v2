@@ -135,7 +135,6 @@ pub fn default_calibration_input() -> CalibrationInput {
         shoulder_width_m: 0.46,
         arm_span_ratio: 1.01,
         fingertip_reach_ratio: 1.33,
-        camera_height_m: 1.25,
         camera_distance_m: 4.7,
         lens_tilt_deg: 2.0,
     }
