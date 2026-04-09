@@ -2,6 +2,10 @@
 
 This area supports the raw-video intake flow.
 
+- `inbox/side/`
+  Drop raw side-view session videos here before intake.
+- `inbox/front/`
+  Drop raw front or front-quarter session videos here before intake.
 - `raw/<session_id>/`
   Stored uploaded source clips.
 - `manifests/`
