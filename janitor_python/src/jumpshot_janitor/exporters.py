@@ -131,6 +131,12 @@ def build_training_corpus(project_root: Path) -> tuple[pd.DataFrame, dict[str, A
         shots = _ensure_columns(pd.read_csv(annotations_root / "shots.csv"))
         records_collection.append(_derive_columns(shots, athlete))
 
+    uploads_processed = dataset_root / "uploads" / "processed"
+    if uploads_processed.exists():
+        for parquet_path in sorted(uploads_processed.glob("*/*_shot_records.parquet")):
+            dataset_names.append(f"processed:{parquet_path.parent.name}")
+            records_collection.append(pd.read_parquet(parquet_path))
+
     corpus = pd.concat(records_collection, ignore_index=True) if records_collection else pd.DataFrame(columns=REQUIRED_COLUMNS)
     metadata = {
         "dataset_names": dataset_names,
