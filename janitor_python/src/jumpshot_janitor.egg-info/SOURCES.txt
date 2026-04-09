@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+src/jumpshot_janitor/__init__.py
+src/jumpshot_janitor/cli.py
+src/jumpshot_janitor/exporters.py
+src/jumpshot_janitor/schema.py
+src/jumpshot_janitor.egg-info/PKG-INFO
+src/jumpshot_janitor.egg-info/SOURCES.txt
+src/jumpshot_janitor.egg-info/dependency_links.txt
+src/jumpshot_janitor.egg-info/entry_points.txt
+src/jumpshot_janitor.egg-info/requires.txt
+src/jumpshot_janitor.egg-info/top_level.txt

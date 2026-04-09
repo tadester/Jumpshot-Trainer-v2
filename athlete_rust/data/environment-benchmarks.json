@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "name": "environment-benchmark-targets",
+    "referenceDataset": "DeepSportRadar-style validation schema",
+    "notes": [
+      "These are target acceptance thresholds for model evaluation across gym and outdoor conditions.",
+      "Replace synthetic values with empirical benchmark scores after collecting a validation set."
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "indoor-bright-hardwood",
+      "lightingLuxRange": [700, 1500],
+      "courtType": "hardwood",
+      "backgroundComplexity": "medium",
+      "targetPoseTrackingPck": 0.94,
+      "targetBallTrackingIoU": 0.88
+    },
+    {
+      "id": "indoor-dim-recreation-center",
+      "lightingLuxRange": [250, 650],
+      "courtType": "hardwood",
+      "backgroundComplexity": "high",
+      "targetPoseTrackingPck": 0.9,
+      "targetBallTrackingIoU": 0.82
+    },
+    {
+      "id": "outdoor-sunny-blacktop",
+      "lightingLuxRange": [5000, 25000],
+      "courtType": "blacktop",
+      "backgroundComplexity": "high",
+      "targetPoseTrackingPck": 0.91,
+      "targetBallTrackingIoU": 0.84
+    },
+    {
+      "id": "outdoor-overcast-park",
+      "lightingLuxRange": [900, 4500],
+      "courtType": "painted-concrete",
+      "backgroundComplexity": "high",
+      "targetPoseTrackingPck": 0.92,
+      "targetBallTrackingIoU": 0.85
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "biomech_ai_shooting_form_analyzer"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust biomechanical diagnostic engine for jump-shot analysis"
+license = "MIT"
+
+[lib]
+name = "biomech_ai"
+path = "src/lib.rs"
+
+[dependencies]
+eframe = "0.33"
+egui = "0.33"
+polars = { version = "0.51", default-features = false, features = ["fmt", "parquet"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

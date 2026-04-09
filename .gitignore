@@ -1,0 +1,10 @@
+node_modules/
+target/
+janitor_python/.venv/
+__pycache__/
+*.pyc
+
+datasets/*/derived/
+datasets/shared/processed/
+
+!.gitkeep

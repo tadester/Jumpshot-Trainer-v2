@@ -1,0 +1,27 @@
+{
+  "name": "shot_records",
+  "description": "Shared tabular contract between janitor_python and athlete_rust.",
+  "required_columns": [
+    "athlete_id",
+    "shot_id",
+    "session_date",
+    "fps",
+    "side_video",
+    "angle45_video",
+    "set_point_frame_side",
+    "release_frame_side",
+    "set_point_frame_45",
+    "release_frame_45",
+    "make",
+    "shot_type",
+    "distance_ft",
+    "notes",
+    "handedness",
+    "height_m",
+    "wingspan_m",
+    "standing_reach_m",
+    "release_time_ms_side",
+    "release_time_ms_45",
+    "paired_view_available"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "metadata": {
+    "name": "elite-jump-shot-baseline",
+    "captureFps": 120,
+    "sampleSize": 48,
+    "sourceProfile": "synthetic-prototype-based-on-pro-footage-review",
+    "notes": [
+      "Use this as an MVP placeholder until footage-driven baselines are derived from labeled pro clips.",
+      "All angle values are in degrees; timing values are in milliseconds."
+    ]
+  },
+  "stages": {
+    "ready_stance": {
+      "kneeFlexion": { "min": 148, "max": 168, "ideal": 158 },
+      "hipHinge": { "min": 156, "max": 174, "ideal": 165 },
+      "elbowFlexion": { "min": 78, "max": 102, "ideal": 90 }
+    },
+    "load": {
+      "kneeFlexion": { "min": 92, "max": 122, "ideal": 106 },
+      "hipHinge": { "min": 108, "max": 140, "ideal": 121 },
+      "ballToSternumDistanceRatio": { "min": 0.18, "max": 0.34, "ideal": 0.25 }
+    },
+    "set_point": {
+      "elbowFlexion": { "min": 74, "max": 96, "ideal": 86 },
+      "forearmVerticality": { "min": 82, "max": 96, "ideal": 90 },
+      "elbowFlare": { "min": 0, "max": 8, "ideal": 3 }
+    },
+    "release": {
+      "releaseHeightRatio": { "min": 1.18, "max": 1.42, "ideal": 1.31 },
+      "releaseTimingFromLiftMs": { "min": 240, "max": 410, "ideal": 320 },
+      "releaseAtApexOffsetMs": { "min": -20, "max": 45, "ideal": 12 }
+    },
+    "follow_through": {
+      "wristFreezeMs": { "min": 180, "max": 420, "ideal": 260 },
+      "armArcAngle": { "min": 132, "max": 166, "ideal": 148 },
+      "landingDriftRatio": { "min": 0, "max": 0.18, "ideal": 0.07 }
+    }
+  }
+}

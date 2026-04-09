@@ -1,0 +1,2 @@
+shot_id,session_date,fps,side_video,angle45_video,set_point_frame_side,release_frame_side,set_point_frame_45,release_frame_45,make,shot_type,distance_ft,notes
+shot_001,2026-04-08,60,shot_001_side.mp4,shot_001_45.mp4,84,88,82,87,true,jump_shot,15,template row

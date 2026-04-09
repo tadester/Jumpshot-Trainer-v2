@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: jumpshot-janitor
+Version: 0.1.0
+Summary: Python janitor pipeline for jump-shot data ingestion, auto-label prep, and Parquet export.
+Requires-Python: >=3.11
+Requires-Dist: pandas>=2.2
+Requires-Dist: pyarrow>=18.0
+Requires-Dist: numpy>=2.0

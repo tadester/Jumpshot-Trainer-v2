@@ -1,0 +1,13 @@
+{
+  "athlete_id": "athlete_001",
+  "name": "Sample Athlete",
+  "handedness": "right",
+  "height_m": 1.88,
+  "wingspan_m": 1.95,
+  "standing_reach_m": 2.46,
+  "age": 18,
+  "skill_level": "high_school",
+  "capture_fps": 60,
+  "resolution": "3840x2160",
+  "notes": "Replace this template with the real athlete profile."
+}
