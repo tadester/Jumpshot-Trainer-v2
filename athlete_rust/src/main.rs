@@ -876,11 +876,16 @@ fn processed_shot_browser(
         let Some(bucket) = app.session_buckets.get(app.selected_session) else {
             return;
         };
+        let manual_seed_count = bucket
+            .shot_indices
+            .iter()
+            .filter(|record_index| app.records[**record_index].has_manual_stage_tags)
+            .count();
         right.label(RichText::new("Shots").strong());
         right.add_space(4.0);
         right.label(format!(
-            "Teacher: {}   |   Paired: {}",
-            bucket.summary.teacher_model, bucket.summary.paired_shots
+            "Teacher: {}   |   Paired: {}   |   Manual Seeds: {}",
+            bucket.summary.teacher_model, bucket.summary.paired_shots, manual_seed_count
         ));
         egui::ScrollArea::vertical().max_height(240.0).show(right, |ui| {
             for (local_index, record_index) in bucket.shot_indices.iter().enumerate() {
@@ -891,7 +896,8 @@ fn processed_shot_browser(
                     .or(record.release_time_ms_side)
                     .or(record.release_time_ms_45)
                     .unwrap_or_default();
-                let label = format!("{} • {:.0} ms", record.shot_id, release);
+                let seed_tag = if record.has_manual_stage_tags { " • manual" } else { "" };
+                let label = format!("{} • {:.0} ms{}", record.shot_id, release, seed_tag);
                 if ui
                     .add(
                         egui::Button::new(label)
@@ -936,6 +942,15 @@ fn processed_shot_browser(
         },
     );
     metric_pair(ui, "Teacher", record.teacher_model.as_str());
+    metric_pair(
+        ui,
+        "Stage Tags",
+        if record.has_manual_stage_tags {
+            "manual-seeded rescue shot"
+        } else {
+            "teacher-segmented"
+        },
+    );
     metric_pair(ui, "Elbow Flexion", &format!("{:.1}", record.elbow_flexion.unwrap_or_default()));
     metric_pair(ui, "Knee Load", &format!("{:.1}", record.knee_load.unwrap_or_default()));
     metric_pair(

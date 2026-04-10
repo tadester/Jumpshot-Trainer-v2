@@ -233,6 +233,7 @@ pub struct JanitorShotRecord {
     pub release_time_ms_side: Option<f32>,
     pub release_time_ms_45: Option<f32>,
     pub paired_view_available: bool,
+    pub has_manual_stage_tags: bool,
     pub source_dataset: String,
     pub source_tier: String,
     pub annotation_quality: String,

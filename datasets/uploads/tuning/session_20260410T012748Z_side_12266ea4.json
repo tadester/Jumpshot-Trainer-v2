@@ -1,0 +1,22 @@
+{
+  "replace_auto_shots": true,
+  "manual_shots": [
+    {
+      "shot_id": "manual_side_001",
+      "shot_start_frame": 900,
+      "set_point_frame": 990,
+      "release_frame": 1080,
+      "shot_end_frame": 1140,
+      "apex_frame": 960
+    },
+    {
+      "shot_id": "manual_side_002",
+      "shot_start_frame": 4500,
+      "set_point_frame": 4560,
+      "release_frame": 4740,
+      "shot_end_frame": 4800,
+      "apex_frame": 4620
+    }
+  ]
+}
+

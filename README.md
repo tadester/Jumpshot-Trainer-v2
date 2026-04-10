@@ -66,6 +66,8 @@ The janitor builds frame observations and then segments reps using:
 
 The segmentation is still being tuned against real footage, but it is now running end-to-end on the uploaded sessions in this repo.
 
+For difficult clips, the janitor also supports clip-specific session tuning with manual stage seeds. That path is now used for the weakest uploaded sessions in this repo.
+
 ### 4. Feature Extraction
 
 For each detected shot, the janitor computes shot-level features such as:
@@ -90,7 +92,7 @@ That gives the Rust app a better combined record where:
 - side view contributes timing, load, and jump signals
 - front-quarter view contributes alignment, flare, and release-line signals
 
-This pairing is still heuristic. It currently matches shots by ordered sequence within the same athlete/date group.
+This pairing is still heuristic. It now matches shots using same-day grouping plus normalized session progress and timing similarity, which is stronger than the original ordered-sequence-only pass.
 
 ### 6. Rust Review App
 
@@ -176,8 +178,9 @@ Currently validated in this repo:
 - 4 uploaded videos were ingested and processed
 - one side upload produced usable shot records
 - one front upload produced a larger usable shot set
-- one synthetic paired uploaded-session record was created from same-day side/front sessions
-- two weaker uploaded sessions still process successfully but currently do not yield usable shot windows
+- the two originally weak uploaded sessions were rescued with clip-specific tuning and now each contribute usable shot records
+- the shared corpus now includes manual-seeded rescue shots in addition to teacher-only shots
+- multiple paired uploaded-session records are now created from same-day side/front sessions
 
 Still in active tuning:
 
@@ -261,6 +264,25 @@ Outputs are written under:
 
 - `datasets/uploads/processed/<session_id>/`
 
+Optional weak-session rescue path:
+
+```bash
+janitor_python/.venv/bin/jumpshot-janitor strong-process \
+  --project-root . \
+  --manifest datasets/uploads/manifests/<manifest>.json \
+  --athlete-profile datasets/calibration_20_shot/annotations/athlete_profile.json \
+  --source-dataset uploaded_session \
+  --teacher-model mediapipe_yolov8_teacher \
+  --frame-stride 30 \
+  --yolo-weights yolov8n.pt \
+  --pose-weights yolov8n-pose.pt \
+  --mediapipe-model datasets/models/mediapipe/pose_landmarker_lite.task \
+  --tuning datasets/uploads/tuning/<session>.json
+```
+
+The tuning file can provide manual shot seeds when the default segmenter still fails to recover usable rep windows.
+Those rescue shots are preserved in the corpus with `has_manual_stage_tags=true`, and the Rust app now calls them out directly in the session browser.
+
 ### 6. Rebuild The Shared Corpus
 
 ```bash
@@ -324,4 +346,5 @@ Verified recently:
 - Python janitor modules compile cleanly
 - Rust app passes `cargo check`
 - all 4 uploaded videos were ingested and processed into session artifacts
-- the shared corpus includes uploaded-session rows and paired uploaded-session records
+- the two weakest uploaded sessions were rescued with manual stage seeding
+- the shared corpus now has 44 rows, including uploaded-session rows, paired uploaded-session records, and manual-stage-tagged rescue shots

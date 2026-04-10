@@ -108,7 +108,7 @@ Uploaded sessions are now paired heuristically when:
 - session date matches
 - side and front-quarter records both exist
 
-The current pairing method matches shots by ordered sequence within each same-day group. This is a practical MVP solution, but it should eventually be replaced by true multi-view synchronization.
+The current pairing method matches shots within same-day groups using normalized session progress plus timing similarity. This is stronger than the original ordered-sequence pass, but it should still eventually be replaced by true multi-view synchronization.
 
 ## Training Positioning
 
@@ -150,13 +150,14 @@ Already working:
 - processed-session dashboard summaries
 - processed-shot browser in the Rust UI
 - a fitted supervised Rust-side score model over the current feature corpus
+- manual-stage-tagged rescue shots folded into the shared corpus
 
 Still being tuned:
 
 - stage realism on long sessions
 - sparse-stride timing accuracy
 - view pairing fidelity
-- weak-session recovery for uploads that still process into zero-shot session shells
+- reducing how often weak-session recovery needs manual seeding
 - final training labels and large-scale supervised fitting
 
 ## Recommended Next Build Steps

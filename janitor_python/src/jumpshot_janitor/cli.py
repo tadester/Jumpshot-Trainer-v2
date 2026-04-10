@@ -28,6 +28,7 @@ def main() -> None:
     process.add_argument("--ball-json", type=Path, help="Teacher-model ball-track output json")
     process.add_argument("--source-dataset", type=str, default="uploaded_session", help="Logical dataset/source name")
     process.add_argument("--teacher-model", type=str, default="teacher_import", help="Teacher model identifier")
+    process.add_argument("--tuning", type=Path, help="Optional session tuning JSON with manual shot seeds")
     auto = subparsers.add_parser("auto-process", help="Run the built-in CV teacher and process a raw uploaded session")
     auto.add_argument("--project-root", type=Path, required=True, help="Repo root path")
     auto.add_argument("--manifest", type=Path, required=True, help="Path to the intake manifest json")
@@ -35,6 +36,7 @@ def main() -> None:
     auto.add_argument("--source-dataset", type=str, default="uploaded_session", help="Logical dataset/source name")
     auto.add_argument("--teacher-model", type=str, default="builtin_cv_teacher", help="Teacher model identifier")
     auto.add_argument("--frame-stride", type=int, default=2, help="Analyze every Nth frame")
+    auto.add_argument("--tuning", type=Path, help="Optional session tuning JSON with manual shot seeds")
     strong = subparsers.add_parser("strong-process", help="Run MediaPipe pose + YOLOv8 ball teacher on a raw uploaded session")
     strong.add_argument("--project-root", type=Path, required=True, help="Repo root path")
     strong.add_argument("--manifest", type=Path, required=True, help="Path to the intake manifest json")
@@ -45,6 +47,7 @@ def main() -> None:
     strong.add_argument("--yolo-weights", type=str, default="yolov8n.pt", help="YOLOv8 weights name or path")
     strong.add_argument("--pose-weights", type=str, default="yolov8n-pose.pt", help="YOLO pose weights used if MediaPipe is unavailable")
     strong.add_argument("--mediapipe-model", type=str, help="Optional path to a MediaPipe pose landmarker .task model")
+    strong.add_argument("--tuning", type=Path, help="Optional session tuning JSON with manual shot seeds")
 
     args = parser.parse_args()
 
@@ -67,6 +70,7 @@ def main() -> None:
             ball_json=args.ball_json.resolve() if args.ball_json else None,
             source_dataset=args.source_dataset,
             teacher_model=args.teacher_model,
+            tuning_path=args.tuning.resolve() if args.tuning else None,
         )
         for label, path in outputs.items():
             print(f"Wrote {label}: {path}")
@@ -78,6 +82,7 @@ def main() -> None:
             source_dataset=args.source_dataset,
             teacher_model=args.teacher_model,
             frame_stride=args.frame_stride,
+            tuning_path=args.tuning.resolve() if args.tuning else None,
         )
         for label, path in outputs.items():
             print(f"Wrote {label}: {path}")
@@ -92,6 +97,7 @@ def main() -> None:
             yolo_weights=args.yolo_weights,
             pose_weights=args.pose_weights,
             mediapipe_model=args.mediapipe_model,
+            tuning_path=args.tuning.resolve() if args.tuning else None,
         )
         for label, path in outputs.items():
             print(f"Wrote {label}: {path}")

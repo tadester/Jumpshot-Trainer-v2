@@ -108,6 +108,12 @@ def _processed_session_dir(project_root: Path, session_id: str) -> Path:
     return session_dir
 
 
+def _load_tuning(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
 def _load_mediapipe():
     os.environ.setdefault("MPLCONFIGDIR", str((Path.cwd() / ".mplcache").resolve()))
     import mediapipe as mp  # type: ignore
@@ -746,6 +752,36 @@ def _segment_shots(frame_df: pd.DataFrame) -> pd.DataFrame:
     return _refine_shot_windows(_segment_shots_from_valleys(frame_df), frame_df)
 
 
+def _manual_shot_windows(tuning: dict[str, Any]) -> pd.DataFrame:
+    manual = tuning.get("manual_shots", [])
+    if not isinstance(manual, list):
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(manual, start=1):
+        if not isinstance(item, dict):
+            continue
+        try:
+            shot_start_frame = int(item["shot_start_frame"])
+            set_point_frame = int(item["set_point_frame"])
+            release_frame = int(item["release_frame"])
+            shot_end_frame = int(item["shot_end_frame"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        apex_frame = int(item.get("apex_frame", set_point_frame))
+        rows.append(
+            {
+                "shot_id": str(item.get("shot_id", f"shot_{index:03d}")),
+                "shot_start_frame": shot_start_frame,
+                "set_point_frame": set_point_frame,
+                "release_frame": release_frame,
+                "shot_end_frame": shot_end_frame,
+                "apex_frame": apex_frame,
+                "manual_seed": True,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _segment_shots_from_wrist_motion(frame_df: pd.DataFrame) -> pd.DataFrame:
     if "wrist_y" not in frame_df or frame_df["wrist_y"].notna().sum() < 8:
         return pd.DataFrame()
@@ -945,6 +981,7 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
         release_frame = int(shot["release_frame"])
         end_frame = int(shot["shot_end_frame"])
         apex_frame = int(shot["apex_frame"])
+        manual_seed = bool(shot.get("manual_seed", False))
 
         start_frame = min(start_frame, set_point_frame, release_frame, end_frame)
         end_frame = max(start_frame, set_point_frame, release_frame, end_frame)
@@ -967,6 +1004,29 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
 
         if "hip_y" in window and window["hip_y"].notna().any():
             apex_frame = int(window.loc[window["hip_y"].idxmin()]["frame_index"])
+
+        if manual_seed:
+            sampled_frames = sorted(window["frame_index"].astype(int).tolist())
+            pre_release = [frame for frame in sampled_frames if frame < release_frame]
+            post_release = [frame for frame in sampled_frames if frame > release_frame]
+            pre_set = [frame for frame in sampled_frames if frame < set_point_frame]
+            post_set = [frame for frame in sampled_frames if frame > set_point_frame]
+
+            if pre_set:
+                start_frame = pre_set[-1]
+            elif sampled_frames:
+                start_frame = sampled_frames[0]
+
+            if post_release:
+                end_frame = post_release[0]
+            else:
+                end_frame = release_frame
+
+            if release_frame <= set_point_frame and post_set:
+                release_frame = post_set[0]
+
+            if start_frame >= set_point_frame and pre_release:
+                start_frame = pre_release[0]
 
         if release_frame < set_point_frame:
             release_frame = set_point_frame
@@ -1004,6 +1064,7 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
                 "release_frame": release_frame,
                 "shot_end_frame": end_frame,
                 "apex_frame": apex_frame,
+                "manual_seed": manual_seed,
             }
         )
 
@@ -1074,7 +1135,7 @@ def _extract_shot_features(
                 "release_time_ms_45": release_time_ms if manifest.view == "angle45" else None,
                 "paired_view_available": False,
                 "release_timing_gap_ms": 0.0,
-                "has_manual_stage_tags": False,
+                "has_manual_stage_tags": bool(shot.get("manual_seed", False)),
                 "is_training_candidate": True,
                 "elbow_flexion": float(release.get("elbow_flexion", set_point.get("elbow_flexion", 86.0))),
                 "knee_load": float(window["knee_load"].min()) if window["knee_load"].notna().any() else 106.0,
@@ -1106,10 +1167,12 @@ def process_session(
     ball_json: Path | None,
     source_dataset: str,
     teacher_model: str,
+    tuning_path: Path | None = None,
 ) -> dict[str, Path]:
     manifest_data = json.loads(manifest_path.read_text())
     manifest = VideoManifest(**manifest_data)
     athlete_profile = json.loads(athlete_profile_path.read_text())
+    tuning = _load_tuning(tuning_path)
     pose_payload = _load_json(pose_json)
     ball_payload = _load_json(ball_json)
 
@@ -1120,6 +1183,13 @@ def process_session(
 
     frame_df = _frame_observations(pose_frames, ball_frames, manifest.fps, athlete_profile.get("handedness", "right"))
     shot_df = _segment_shots(frame_df)
+    manual_shots = _manual_shot_windows(tuning)
+    if not manual_shots.empty:
+        if tuning.get("replace_auto_shots", False):
+            shot_df = manual_shots
+        else:
+            shot_df = pd.concat([shot_df, manual_shots], ignore_index=True)
+    shot_df = _refine_shot_windows(shot_df, frame_df)
     shot_records = _extract_shot_features(
         shot_df,
         frame_df,
@@ -1145,6 +1215,7 @@ def process_session(
                 "athlete_profile_path": str(athlete_profile_path.resolve()),
                 "teacher_model": teacher_model,
                 "source_dataset": source_dataset,
+                "tuning_path": str(tuning_path.resolve()) if tuning_path and tuning_path.exists() else None,
                 "frame_count": int(len(frame_df)),
                 "shot_count": int(len(shot_records)),
                 "frame_observations_parquet": str(frame_parquet.resolve()),
@@ -1168,6 +1239,7 @@ def auto_process_session(
     source_dataset: str,
     teacher_model: str,
     frame_stride: int = 2,
+    tuning_path: Path | None = None,
 ) -> dict[str, Path]:
     teacher_outputs = run_builtin_teacher(
         project_root=project_root,
@@ -1183,6 +1255,7 @@ def auto_process_session(
         ball_json=teacher_outputs["ball_json"],
         source_dataset=source_dataset,
         teacher_model=teacher_model,
+        tuning_path=tuning_path,
     )
     return {**teacher_outputs, **processed}
 
@@ -1197,6 +1270,7 @@ def auto_process_session_strong(
     yolo_weights: str = "yolov8n.pt",
     pose_weights: str = "yolov8n-pose.pt",
     mediapipe_model: str | None = None,
+    tuning_path: Path | None = None,
 ) -> dict[str, Path]:
     teacher_outputs = run_strong_teacher(
         project_root=project_root,
@@ -1215,5 +1289,6 @@ def auto_process_session_strong(
         ball_json=teacher_outputs["ball_json"],
         source_dataset=source_dataset,
         teacher_model=teacher_model,
+        tuning_path=tuning_path,
     )
     return {**teacher_outputs, **processed}

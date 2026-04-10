@@ -1,0 +1,21 @@
+{
+  "replace_auto_shots": true,
+  "manual_shots": [
+    {
+      "shot_id": "manual_angle_001",
+      "shot_start_frame": 180,
+      "set_point_frame": 240,
+      "release_frame": 300,
+      "shot_end_frame": 360,
+      "apex_frame": 240
+    },
+    {
+      "shot_id": "manual_angle_002",
+      "shot_start_frame": 3360,
+      "set_point_frame": 3480,
+      "release_frame": 3660,
+      "shot_end_frame": 3720,
+      "apex_frame": 3540
+    }
+  ]
+}

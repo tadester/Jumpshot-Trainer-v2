@@ -82,6 +82,7 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
     let release_time_ms_side = frame.column("release_time_ms_side")?;
     let release_time_ms_45 = frame.column("release_time_ms_45")?;
     let paired_view_available = frame.column("paired_view_available")?;
+    let has_manual_stage_tags = frame.column("has_manual_stage_tags").ok();
     let source_dataset = frame.column("source_dataset")?;
     let source_tier = frame.column("source_tier")?;
     let annotation_quality = frame.column("annotation_quality")?;
@@ -127,6 +128,9 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
             release_time_ms_side: opt_f32_value(release_time_ms_side, index),
             release_time_ms_45: opt_f32_value(release_time_ms_45, index),
             paired_view_available: bool_value(paired_view_available, index, false),
+            has_manual_stage_tags: has_manual_stage_tags
+                .map(|column| bool_value(column, index, false))
+                .unwrap_or(false),
             source_dataset: string_value(source_dataset, index),
             source_tier: string_value(source_tier, index),
             annotation_quality: string_value(annotation_quality, index),
