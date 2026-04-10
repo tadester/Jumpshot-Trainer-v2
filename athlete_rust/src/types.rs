@@ -289,3 +289,15 @@ pub struct ProcessedSessionSummary {
     pub side_only_shots: usize,
     pub angle_only_shots: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SupervisedModelSummary {
+    pub trained: bool,
+    pub example_count: usize,
+    pub feature_count: usize,
+    pub training_mae: f32,
+    pub validation_mae: f32,
+    pub epochs: usize,
+    pub bias: f32,
+    pub weights: Vec<f32>,
+}

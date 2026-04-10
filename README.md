@@ -99,10 +99,11 @@ The Rust app reads the shared training corpus and shows:
 - athlete calibration
 - training readiness
 - processed session coverage
+- session and shot browser
 - diagnostics
 - session audit
 - visual review panels
-- live score and coaching hints
+- heuristic and supervised Rust-side scores
 
 The dashboard is no longer just generic scaffolding. It now reads real uploaded-session corpus rows and surfaces processed-session summaries directly.
 
@@ -121,7 +122,7 @@ What it is today:
 - a real teacher-driven ingestion pipeline
 - a real feature-extraction pipeline
 - a real Rust desktop app reading processed biomechanics records
-- a Rust-side shot-quality scorer and training-readiness layer
+- a Rust-side heuristic scorer plus a fitted supervised score model over structured features
 - a corpus that can now include uploaded-session data, paired-view records, and manual gold-set data
 
 So the current model stack is:
@@ -146,7 +147,7 @@ The current training story is:
 3. Export them into Parquet.
 4. Use Rust to summarize dataset quality, produce training examples, and prepare for future Candle-based model training.
 
-The present Rust-side “model” is still a lightweight prototype scorer over structured shot features. It is useful for MVP feedback and UI integration, but it should not yet be described as a finished trained biomechanics model.
+The Rust side now includes a simple supervised fitted model over the structured feature corpus, with train and validation error surfaced in the UI. It is a meaningful step up from the original prototype scorer, but it is still not the final long-term biomechanics model.
 
 The long-term training target is:
 
@@ -167,7 +168,8 @@ Working today:
 - uploaded-session corpus inclusion
 - paired uploaded-session record generation
 - Rust corpus ingestion
-- Rust processed-session dashboard summaries
+- Rust processed-session browser and dashboard summaries
+- Rust supervised score model fitted from the current corpus
 
 Currently validated in this repo:
 
@@ -175,6 +177,7 @@ Currently validated in this repo:
 - one side upload produced usable shot records
 - one front upload produced a larger usable shot set
 - one synthetic paired uploaded-session record was created from same-day side/front sessions
+- two weaker uploaded sessions still process successfully but currently do not yield usable shot windows
 
 Still in active tuning:
 
@@ -297,8 +300,10 @@ Calibration screen:
 Dashboard:
 
 - live shot intelligence
+- supervised model summary
 - training readiness
 - processed session summaries
+- session browser with per-shot drill-down
 - diagnostics
 - shot audit
 - kinetic-chain stages

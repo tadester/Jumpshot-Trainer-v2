@@ -2,9 +2,34 @@ use crate::ml::infer_shot_quality;
 use crate::trainer::default_calibration_input;
 use crate::types::{
     CalibrationInput, JanitorShotRecord, ModelReadiness, ProcessedSessionSummary, ShotInput, ShotQualityLabel,
-    TrainingDatasetSummary, TrainingExample,
+    SupervisedModelSummary, TrainingDatasetSummary, TrainingExample,
 };
 use std::collections::BTreeMap;
+
+pub fn feature_vector_from_shot_input(
+    shot: &ShotInput,
+    height_m: f32,
+    wingspan_m: f32,
+    standing_reach_m: f32,
+    distance_ft: f32,
+    paired_view: bool,
+) -> Vec<f32> {
+    vec![
+        shot.elbow_flexion / 120.0,
+        shot.knee_load / 135.0,
+        shot.forearm_verticality / 100.0,
+        shot.elbow_flare / 20.0,
+        shot.release_height_ratio / 1.5,
+        shot.release_timing_ms / 500.0,
+        (shot.release_at_apex_offset_ms + 40.0) / 160.0,
+        shot.jump_height / 0.6,
+        height_m / 2.3,
+        wingspan_m / 2.4,
+        standing_reach_m / 3.0,
+        distance_ft / 30.0,
+        if paired_view { 1.0 } else { 0.0 },
+    ]
+}
 
 pub fn shot_input_from_record(record: &JanitorShotRecord) -> ShotInput {
     let release_timing = record
@@ -55,21 +80,14 @@ pub fn build_training_examples(records: &[JanitorShotRecord]) -> Vec<TrainingExa
         .map(|record| {
             let shot = shot_input_from_record(record);
             let inference = infer_shot_quality(&shot);
-            let features = vec![
-                shot.elbow_flexion / 120.0,
-                shot.knee_load / 135.0,
-                shot.forearm_verticality / 100.0,
-                shot.elbow_flare / 20.0,
-                shot.release_height_ratio / 1.5,
-                shot.release_timing_ms / 500.0,
-                (shot.release_at_apex_offset_ms + 40.0) / 160.0,
-                shot.jump_height / 0.6,
-                record.height_m / 2.3,
-                record.wingspan_m / 2.4,
-                record.standing_reach_m / 3.0,
-                record.distance_ft.unwrap_or(15.0) / 30.0,
-                if record.paired_view_available { 1.0 } else { 0.0 },
-            ];
+            let features = feature_vector_from_shot_input(
+                &shot,
+                record.height_m,
+                record.wingspan_m,
+                record.standing_reach_m,
+                record.distance_ft.unwrap_or(15.0),
+                record.paired_view_available,
+            );
 
             TrainingExample {
                 shot_id: record.shot_id.clone(),
@@ -218,4 +236,80 @@ pub fn summarize_processed_sessions(records: &[JanitorShotRecord]) -> Vec<Proces
             }
         })
         .collect()
+}
+
+fn linear_predict(weights: &[f32], bias: f32, features: &[f32]) -> f32 {
+    let dot = weights
+        .iter()
+        .zip(features.iter())
+        .fold(bias, |acc, (weight, feature)| acc + (weight * feature));
+    dot.clamp(0.0, 1.0)
+}
+
+fn mean_absolute_error(weights: &[f32], bias: f32, examples: &[TrainingExample]) -> f32 {
+    if examples.is_empty() {
+        return 0.0;
+    }
+    let total = examples
+        .iter()
+        .map(|example| (linear_predict(weights, bias, &example.features) - example.target_score).abs())
+        .sum::<f32>();
+    total / examples.len() as f32
+}
+
+pub fn train_supervised_score_model(examples: &[TrainingExample]) -> SupervisedModelSummary {
+    let feature_count = examples.first().map(|example| example.features.len()).unwrap_or(0);
+    if examples.len() < 4 || feature_count == 0 {
+        return SupervisedModelSummary {
+            trained: false,
+            example_count: examples.len(),
+            feature_count,
+            training_mae: 0.0,
+            validation_mae: 0.0,
+            epochs: 0,
+            bias: 0.0,
+            weights: vec![],
+        };
+    }
+
+    let split_index = ((examples.len() as f32) * 0.8).round().clamp(1.0, (examples.len() - 1) as f32) as usize;
+    let (train_set, validation_set) = examples.split_at(split_index);
+    let mut weights = vec![0.0; feature_count];
+    let mut bias = 0.0f32;
+    let learning_rate = 0.08f32;
+    let l2 = 0.0005f32;
+    let epochs = 240usize;
+
+    for _ in 0..epochs {
+        for example in train_set {
+            let prediction = linear_predict(&weights, bias, &example.features);
+            let error = prediction - example.target_score;
+            bias -= learning_rate * error;
+            for (weight, feature) in weights.iter_mut().zip(example.features.iter()) {
+                let gradient = error * feature + l2 * *weight;
+                *weight -= learning_rate * gradient;
+            }
+        }
+    }
+
+    let training_mae = mean_absolute_error(&weights, bias, train_set);
+    let validation_mae = mean_absolute_error(&weights, bias, validation_set);
+
+    SupervisedModelSummary {
+        trained: true,
+        example_count: examples.len(),
+        feature_count,
+        training_mae,
+        validation_mae,
+        epochs,
+        bias,
+        weights,
+    }
+}
+
+pub fn predict_supervised_score(model: &SupervisedModelSummary, features: &[f32]) -> Option<f32> {
+    if !model.trained || model.weights.len() != features.len() {
+        return None;
+    }
+    Some(linear_predict(&model.weights, model.bias, features))
 }

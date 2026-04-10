@@ -736,7 +736,14 @@ def _segment_shots(frame_df: pd.DataFrame) -> pd.DataFrame:
 
     if shots:
         return _refine_shot_windows(pd.DataFrame(shots), frame_df)
-    return _refine_shot_windows(_segment_shots_from_wrist_motion(frame_df), frame_df)
+    wrist_motion = _segment_shots_from_wrist_motion(frame_df)
+    refined_wrist_motion = _refine_shot_windows(wrist_motion, frame_df)
+    if not refined_wrist_motion.empty:
+        return refined_wrist_motion
+    cycle_windows = _refine_shot_windows(_segment_shots_from_cycles(frame_df), frame_df)
+    if not cycle_windows.empty:
+        return cycle_windows
+    return _refine_shot_windows(_segment_shots_from_valleys(frame_df), frame_df)
 
 
 def _segment_shots_from_wrist_motion(frame_df: pd.DataFrame) -> pd.DataFrame:
@@ -801,6 +808,128 @@ def _segment_shots_from_wrist_motion(frame_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(shots)
 
 
+def _segment_shots_from_cycles(frame_df: pd.DataFrame) -> pd.DataFrame:
+    if "wrist_y" not in frame_df or frame_df["wrist_y"].notna().sum() < 10:
+        return pd.DataFrame()
+
+    wrist_df = frame_df[frame_df["wrist_y"].notna()].copy().sort_values("frame_index").reset_index(drop=True)
+    if wrist_df.empty:
+        return pd.DataFrame()
+
+    smoothed = wrist_df["wrist_y"].rolling(window=5, min_periods=1, center=True).median()
+    baseline = float(smoothed.quantile(0.62))
+    activation_margin = max(24.0, float((smoothed.quantile(0.75) - smoothed.quantile(0.2)) * 0.55))
+    release_margin = max(12.0, activation_margin * 0.45)
+    fps = 1000.0 / max(1.0, float(wrist_df["timestamp_ms"].diff().dropna().median() or 33.0))
+
+    shots: list[dict[str, Any]] = []
+    last_release_index = -10
+    values = smoothed.tolist()
+
+    for index in range(2, len(values) - 2):
+        current = float(values[index])
+        if current > baseline - activation_margin:
+            continue
+        if not (current <= values[index - 1] and current <= values[index + 1]):
+            continue
+        if index - last_release_index < 3:
+            continue
+
+        left_start = max(0, index - 6)
+        right_end = min(len(values) - 1, index + 8)
+        left_window = values[left_start:index]
+        right_window = values[index + 1 : right_end + 1]
+        if not left_window or not right_window:
+            continue
+
+        pre_peak_value = max(left_window)
+        post_peak_value = max(right_window)
+        if pre_peak_value - current < activation_margin * 0.6:
+            continue
+        if post_peak_value - current < release_margin:
+            continue
+
+        pre_peak_index = left_start + left_window.index(pre_peak_value)
+        release_index = None
+        for candidate in range(index + 1, right_end + 1):
+            if values[candidate] >= current + release_margin:
+                release_index = candidate
+                break
+        if release_index is None:
+            continue
+
+        end_index = min(len(values) - 1, release_index + 2)
+        if (wrist_df.loc[end_index, "timestamp_ms"] - wrist_df.loc[pre_peak_index, "timestamp_ms"]) > 3500.0:
+            continue
+
+        window = wrist_df.iloc[pre_peak_index : end_index + 1]
+        apex_frame = int(window.loc[window["hip_y"].idxmin()]["frame_index"]) if "hip_y" in window and window["hip_y"].notna().any() else int(wrist_df.loc[index, "frame_index"])
+        shots.append(
+            {
+                "shot_id": f"shot_{len(shots)+1:03d}",
+                "shot_start_frame": int(wrist_df.loc[pre_peak_index, "frame_index"]),
+                "set_point_frame": int(wrist_df.loc[index, "frame_index"]),
+                "release_frame": int(wrist_df.loc[release_index, "frame_index"]),
+                "shot_end_frame": int(wrist_df.loc[end_index, "frame_index"]),
+                "apex_frame": apex_frame,
+            }
+        )
+        last_release_index = release_index
+
+    return pd.DataFrame(shots)
+
+
+def _segment_shots_from_valleys(frame_df: pd.DataFrame) -> pd.DataFrame:
+    if "wrist_y" not in frame_df or frame_df["wrist_y"].notna().sum() < 8:
+        return pd.DataFrame()
+
+    wrist_df = frame_df[frame_df["wrist_y"].notna()].copy().sort_values("frame_index").reset_index(drop=True)
+    smoothed = wrist_df["wrist_y"].rolling(window=3, min_periods=1, center=True).median()
+    low_threshold = float(smoothed.quantile(0.28))
+    release_margin = max(12.0, float((smoothed.quantile(0.72) - smoothed.quantile(0.28)) * 0.35))
+    baseline = float(smoothed.quantile(0.65))
+    last_index = -4
+    shots: list[dict[str, Any]] = []
+
+    for index in range(1, len(smoothed) - 1):
+        current = float(smoothed.iloc[index])
+        if current > low_threshold:
+            continue
+        if current > float(smoothed.iloc[index - 1]) or current > float(smoothed.iloc[index + 1]):
+            continue
+        if index - last_index < 2:
+            continue
+
+        start_index = max(0, index - 1)
+        while start_index > 0 and float(smoothed.iloc[start_index]) < baseline:
+            start_index -= 1
+
+        release_index = None
+        for candidate in range(index + 1, min(len(smoothed), index + 5)):
+            if float(smoothed.iloc[candidate]) >= current + release_margin:
+                release_index = candidate
+                break
+        if release_index is None:
+            continue
+
+        end_index = min(len(smoothed) - 1, release_index + 1)
+        window = wrist_df.iloc[start_index : end_index + 1]
+        apex_frame = int(window.loc[window["hip_y"].idxmin()]["frame_index"]) if "hip_y" in window and window["hip_y"].notna().any() else int(wrist_df.loc[index, "frame_index"])
+        shots.append(
+            {
+                "shot_id": f"shot_{len(shots)+1:03d}",
+                "shot_start_frame": int(wrist_df.loc[start_index, "frame_index"]),
+                "set_point_frame": int(wrist_df.loc[index, "frame_index"]),
+                "release_frame": int(wrist_df.loc[release_index, "frame_index"]),
+                "shot_end_frame": int(wrist_df.loc[end_index, "frame_index"]),
+                "apex_frame": apex_frame,
+            }
+        )
+        last_index = release_index
+
+    return pd.DataFrame(shots)
+
+
 def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.DataFrame:
     if shot_df.empty:
         return shot_df
@@ -854,6 +983,8 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
         if release_delay_frames < 0:
             continue
         if release_delay_frames > max(120, int(2500.0 / fps_estimate)):
+            continue
+        if release_delay_frames > duration_frames:
             continue
 
         if set_point_frame not in frame_indices or release_frame not in frame_indices:

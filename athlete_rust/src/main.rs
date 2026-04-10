@@ -1,12 +1,14 @@
 use biomech_ai::ingest::load_janitor_shot_records;
 use biomech_ai::trainer::{analyze_shot, build_training_session, default_calibration_input};
 use biomech_ai::training::{
-    build_training_examples, calibration_input_from_record, evaluate_model_readiness, shot_input_from_record,
-    summarize_processed_sessions, summarize_training_dataset,
+    build_training_examples, calibration_input_from_record, evaluate_model_readiness, feature_vector_from_shot_input,
+    predict_supervised_score, shot_input_from_record, summarize_processed_sessions, summarize_training_dataset,
+    train_supervised_score_model,
 };
 use biomech_ai::types::{
     CalibrationInput, DiagnosticSeverity, ModelReadiness, ProcessedSessionSummary, SessionAudit,
-    SessionShotSummary, ShotInput, ShotQualityLabel, ShotStage, StageFeedback, TrainingDatasetSummary,
+    SessionShotSummary, ShotInput, ShotQualityLabel, ShotStage, StageFeedback, SupervisedModelSummary,
+    TrainingDatasetSummary, JanitorShotRecord,
 };
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, RichText, Stroke, Vec2};
 
@@ -32,6 +34,12 @@ enum AppScreen {
     Dashboard,
 }
 
+#[derive(Clone)]
+struct SessionBucket {
+    summary: ProcessedSessionSummary,
+    shot_indices: Vec<usize>,
+}
+
 struct JumpshotTrainerApp {
     calibration_input: CalibrationInput,
     input: ShotInput,
@@ -42,6 +50,11 @@ struct JumpshotTrainerApp {
     dataset_summary: TrainingDatasetSummary,
     model_readiness: ModelReadiness,
     processed_sessions: Vec<ProcessedSessionSummary>,
+    records: Vec<JanitorShotRecord>,
+    session_buckets: Vec<SessionBucket>,
+    selected_session: usize,
+    selected_shot: usize,
+    supervised_model: SupervisedModelSummary,
 }
 
 impl JumpshotTrainerApp {
@@ -70,7 +83,7 @@ impl JumpshotTrainerApp {
         let corpus_path = std::path::Path::new("../datasets/shared/processed/training_corpus.parquet");
         let parquet_path = std::path::Path::new("../datasets/shared/processed/calibration_20_shot_shot_records.parquet");
         let preferred_path = if corpus_path.exists() { corpus_path } else { parquet_path };
-        let (input, calibration_input, dataset_status, dataset_summary, model_readiness, processed_sessions) =
+        let (input, calibration_input, dataset_status, dataset_summary, model_readiness, processed_sessions, records, supervised_model) =
             if preferred_path.exists() {
             match load_janitor_shot_records(preferred_path) {
                 Ok(records) if !records.is_empty() => {
@@ -78,6 +91,7 @@ impl JumpshotTrainerApp {
                     let summary = summarize_training_dataset(&examples);
                     let readiness = evaluate_model_readiness(&summary);
                     let processed_sessions = summarize_processed_sessions(&records);
+                    let supervised_model = train_supervised_score_model(&examples);
                     let first = &records[0];
                     (
                         shot_input_from_record(first),
@@ -86,6 +100,8 @@ impl JumpshotTrainerApp {
                         summary,
                         readiness,
                         processed_sessions,
+                        records,
+                        supervised_model,
                     )
                 }
                 Ok(_) => (
@@ -95,6 +111,8 @@ impl JumpshotTrainerApp {
                     empty_summary.clone(),
                     evaluate_model_readiness(&empty_summary),
                     vec![],
+                    vec![],
+                    train_supervised_score_model(&[]),
                 ),
                 Err(error) => (
                     default_input,
@@ -103,6 +121,8 @@ impl JumpshotTrainerApp {
                     empty_summary.clone(),
                     evaluate_model_readiness(&empty_summary),
                     vec![],
+                    vec![],
+                    train_supervised_score_model(&[]),
                 ),
             }
         } else {
@@ -113,8 +133,12 @@ impl JumpshotTrainerApp {
                 empty_summary.clone(),
                 evaluate_model_readiness(&empty_summary),
                 vec![],
+                vec![],
+                train_supervised_score_model(&[]),
             )
         };
+
+        let session_buckets = build_session_buckets(&records, &processed_sessions);
 
         let (shots, session_audit) = build_training_session(&input, &calibration_input, 8);
 
@@ -128,6 +152,11 @@ impl JumpshotTrainerApp {
             dataset_summary,
             model_readiness,
             processed_sessions,
+            records,
+            session_buckets,
+            selected_session: 0,
+            selected_shot: 0,
+            supervised_model,
         }
     }
 
@@ -136,12 +165,38 @@ impl JumpshotTrainerApp {
         self.shots = shots;
         self.session_audit = audit;
     }
+
+    fn load_selected_processed_shot(&mut self) {
+        let Some(bucket) = self.session_buckets.get(self.selected_session) else {
+            return;
+        };
+        let Some(record_index) = bucket.shot_indices.get(self.selected_shot) else {
+            return;
+        };
+        let Some(record) = self.records.get(*record_index) else {
+            return;
+        };
+        self.input = shot_input_from_record(record);
+        self.calibration_input = calibration_input_from_record(record);
+        self.regenerate_session();
+    }
 }
 
 impl eframe::App for JumpshotTrainerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         paint_background(ctx);
         let snapshot = analyze_shot(&self.input, &self.calibration_input);
+        let supervised_score = predict_supervised_score(
+            &self.supervised_model,
+            &feature_vector_from_shot_input(
+                &self.input,
+                self.calibration_input.body_height_m,
+                self.calibration_input.body_height_m * self.calibration_input.arm_span_ratio,
+                self.calibration_input.body_height_m * self.calibration_input.fingertip_reach_ratio,
+                15.0,
+                false,
+            ),
+        );
 
         egui::TopBottomPanel::top("header")
             .frame(
@@ -180,7 +235,7 @@ impl eframe::App for JumpshotTrainerApp {
 
         match self.screen {
             AppScreen::Calibration => self.render_calibration(ctx, &snapshot),
-            AppScreen::Dashboard => self.render_dashboard(ctx, &snapshot),
+            AppScreen::Dashboard => self.render_dashboard(ctx, &snapshot, supervised_score),
         }
     }
 }
@@ -248,7 +303,7 @@ impl JumpshotTrainerApp {
             });
     }
 
-    fn render_dashboard(&mut self, ctx: &egui::Context, snapshot: &biomech_ai::trainer::TrainerSnapshot) {
+    fn render_dashboard(&mut self, ctx: &egui::Context, snapshot: &biomech_ai::trainer::TrainerSnapshot, supervised_score: Option<f32>) {
         egui::SidePanel::left("control_panel")
             .frame(
                 egui::Frame::new()
@@ -279,6 +334,18 @@ impl JumpshotTrainerApp {
                 metric_pair(ui, "Reach", &format!("{:.2} m", snapshot.calibration.estimated_standing_reach_m));
                 metric_pair(ui, "Wingspan", &format!("{:.2} m", snapshot.calibration.estimated_wingspan_m));
                 metric_pair(ui, "Camera Angle", &format!("{:.1} deg", snapshot.calibration.estimated_camera_angle_deg));
+                ui.add_space(12.0);
+                section_mini(ui, "Supervised Rust Model");
+                if self.supervised_model.trained {
+                    metric_pair(ui, "Examples", &self.supervised_model.example_count.to_string());
+                    metric_pair(ui, "Train MAE", &format!("{:.3}", self.supervised_model.training_mae));
+                    metric_pair(ui, "Val MAE", &format!("{:.3}", self.supervised_model.validation_mae));
+                    if let Some(score) = supervised_score {
+                        metric_pair(ui, "Live Pred Score", &format!("{:.0} / 100", score * 100.0));
+                    }
+                } else {
+                    ui.label("Not enough corpus examples yet for supervised fitting.");
+                }
             });
 
         egui::CentralPanel::default()
@@ -312,6 +379,12 @@ impl JumpshotTrainerApp {
 
                 section_card(ui, "Processed Sessions", "Uploaded sessions currently in the Rust review corpus, including paired-view coverage and teacher provenance.", |ui| {
                     processed_sessions_panel(ui, &self.processed_sessions);
+                });
+
+                ui.add_space(16.0);
+
+                section_card(ui, "Session Browser", "Select a processed session and drill into specific extracted shots from the corpus.", |ui| {
+                    processed_shot_browser(ui, self, supervised_score);
                 });
 
                 ui.add_space(16.0);
@@ -727,6 +800,169 @@ fn metric_tile_compact(ui: &mut egui::Ui, title: &str, value: usize) {
             ui.label(RichText::new(title).size(12.0).color(Color32::from_rgb(164, 176, 182)));
             ui.label(RichText::new(value.to_string()).size(22.0).strong());
         });
+}
+
+fn build_session_buckets(records: &[JanitorShotRecord], sessions: &[ProcessedSessionSummary]) -> Vec<SessionBucket> {
+    sessions
+        .iter()
+        .map(|summary| {
+            let shot_indices = records
+                .iter()
+                .enumerate()
+                .filter_map(|(index, record)| {
+                    let primary_clip = if !record.side_video.is_empty() {
+                        record.side_video.as_str()
+                    } else if !record.angle45_video.is_empty() {
+                        record.angle45_video.as_str()
+                    } else {
+                        record.clip_uid.as_str()
+                    };
+                    let session_key = format!("{} :: {}", record.session_date, primary_clip);
+                    if session_key == summary.session_key {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            SessionBucket {
+                summary: summary.clone(),
+                shot_indices,
+            }
+        })
+        .collect()
+}
+
+fn processed_shot_browser(
+    ui: &mut egui::Ui,
+    app: &mut JumpshotTrainerApp,
+    supervised_score: Option<f32>,
+) {
+    if app.session_buckets.is_empty() {
+        ui.label("No processed session groups available yet.");
+        return;
+    }
+
+    ui.columns(2, |columns| {
+        let (left_cols, right_cols) = columns.split_at_mut(1);
+        let left = &mut left_cols[0];
+        let right = &mut right_cols[0];
+
+        left.label(RichText::new("Sessions").strong());
+        egui::ScrollArea::vertical().max_height(240.0).show(left, |ui| {
+            for (index, bucket) in app.session_buckets.iter().enumerate() {
+                let selected = app.selected_session == index;
+                let label = format!("{} • {} shots", bucket.summary.session_key, bucket.summary.total_shots);
+                if ui
+                    .add(
+                        egui::Button::new(label)
+                            .fill(if selected {
+                                Color32::from_rgb(190, 113, 58)
+                            } else {
+                                Color32::from_rgb(27, 36, 42)
+                            })
+                            .corner_radius(10.0),
+                    )
+                    .clicked()
+                {
+                    app.selected_session = index;
+                    app.selected_shot = 0;
+                }
+                ui.add_space(4.0);
+            }
+        });
+
+        let Some(bucket) = app.session_buckets.get(app.selected_session) else {
+            return;
+        };
+        right.label(RichText::new("Shots").strong());
+        right.add_space(4.0);
+        right.label(format!(
+            "Teacher: {}   |   Paired: {}",
+            bucket.summary.teacher_model, bucket.summary.paired_shots
+        ));
+        egui::ScrollArea::vertical().max_height(240.0).show(right, |ui| {
+            for (local_index, record_index) in bucket.shot_indices.iter().enumerate() {
+                let record = &app.records[*record_index];
+                let selected = app.selected_shot == local_index;
+                let release = record
+                    .release_timing_ms
+                    .or(record.release_time_ms_side)
+                    .or(record.release_time_ms_45)
+                    .unwrap_or_default();
+                let label = format!("{} • {:.0} ms", record.shot_id, release);
+                if ui
+                    .add(
+                        egui::Button::new(label)
+                            .fill(if selected {
+                                Color32::from_rgb(76, 161, 101)
+                            } else {
+                                Color32::from_rgb(27, 36, 42)
+                            })
+                            .corner_radius(10.0),
+                    )
+                    .clicked()
+                {
+                    app.selected_shot = local_index;
+                }
+                ui.add_space(4.0);
+            }
+        });
+    });
+
+    let Some(bucket) = app.session_buckets.get(app.selected_session) else {
+        return;
+    };
+    let Some(record_index) = bucket.shot_indices.get(app.selected_shot) else {
+        return;
+    };
+    let record = &app.records[*record_index];
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        metric_pair(ui, "Shot Id", record.shot_id.as_str());
+        ui.separator();
+        metric_pair(ui, "Source", record.source_dataset.as_str());
+    });
+    metric_pair(
+        ui,
+        "Views",
+        if record.paired_view_available {
+            "paired side + angle45"
+        } else if !record.side_video.is_empty() {
+            "side only"
+        } else {
+            "angle45 only"
+        },
+    );
+    metric_pair(ui, "Teacher", record.teacher_model.as_str());
+    metric_pair(ui, "Elbow Flexion", &format!("{:.1}", record.elbow_flexion.unwrap_or_default()));
+    metric_pair(ui, "Knee Load", &format!("{:.1}", record.knee_load.unwrap_or_default()));
+    metric_pair(
+        ui,
+        "Forearm Verticality",
+        &format!("{:.1}", record.forearm_verticality.unwrap_or_default()),
+    );
+    metric_pair(ui, "Elbow Flare", &format!("{:.1}", record.elbow_flare.unwrap_or_default()));
+    metric_pair(
+        ui,
+        "Release Timing",
+        &format!(
+            "{:.0} ms",
+            record
+                .release_timing_ms
+                .or(record.release_time_ms_side)
+                .or(record.release_time_ms_45)
+                .unwrap_or_default()
+        ),
+    );
+    if let Some(score) = supervised_score {
+        metric_pair(ui, "Current Live Supervised Score", &format!("{:.0} / 100", score * 100.0));
+    }
+    ui.add_space(10.0);
+    if accent_button(ui, "Load Selected Shot Into Live Controls").clicked() {
+        app.load_selected_processed_shot();
+    }
 }
 
 fn draw_calibration_preview(ui: &mut egui::Ui, calibration_input: &CalibrationInput) {

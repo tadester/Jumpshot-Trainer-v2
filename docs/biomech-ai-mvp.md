@@ -119,7 +119,7 @@ What it is today:
 - teacher-driven perception
 - feature-driven biomechanics extraction
 - a trainable corpus builder
-- a Rust-side model-readiness and review layer
+- a Rust-side model-readiness, review, and supervised score layer
 
 What remains for a real supervised model:
 
@@ -148,12 +148,15 @@ Already working:
 - corpus rebuild
 - Rust corpus ingestion
 - processed-session dashboard summaries
+- processed-shot browser in the Rust UI
+- a fitted supervised Rust-side score model over the current feature corpus
 
 Still being tuned:
 
 - stage realism on long sessions
 - sparse-stride timing accuracy
 - view pairing fidelity
+- weak-session recovery for uploads that still process into zero-shot session shells
 - final training labels and large-scale supervised fitting
 
 ## Recommended Next Build Steps

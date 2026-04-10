@@ -187,16 +187,56 @@ def _pair_uploaded_sessions(frames: list[pd.DataFrame]) -> pd.DataFrame:
     for _, group in uploaded.groupby("pair_group"):
         sides = group[group["has_side"]].sort_values(["session_date", "shot_start_frame_side", "shot_id"])
         angles = group[group["has_angle"]].sort_values(["session_date", "shot_start_frame_45", "shot_id"])
-        pair_count = min(len(sides), len(angles))
-        if pair_count == 0:
+        if sides.empty or angles.empty:
             continue
 
-        for index in range(pair_count):
-            side = sides.iloc[index]
-            angle = angles.iloc[index]
-            paired_rows.append(_merge_pair_records(side, angle, index + 1))
+        pairings = _match_session_pairs(sides.reset_index(drop=True), angles.reset_index(drop=True))
+        for index, (side_idx, angle_idx) in enumerate(pairings, start=1):
+            side = sides.reset_index(drop=True).iloc[side_idx]
+            angle = angles.reset_index(drop=True).iloc[angle_idx]
+            paired_rows.append(_merge_pair_records(side, angle, index))
 
     return pd.DataFrame(paired_rows)
+
+
+def _match_session_pairs(sides: pd.DataFrame, angles: pd.DataFrame) -> list[tuple[int, int]]:
+    side_indices = list(range(len(sides)))
+    angle_indices = list(range(len(angles)))
+    if not side_indices or not angle_indices:
+        return []
+
+    side_norm = _normalized_progress(sides["shot_start_frame_side"])
+    angle_norm = _normalized_progress(angles["shot_start_frame_45"])
+    used_angles: set[int] = set()
+    matches: list[tuple[int, int]] = []
+
+    for side_idx in side_indices:
+        best_angle = None
+        best_score = None
+        for angle_idx in angle_indices:
+            if angle_idx in used_angles:
+                continue
+            progress_gap = abs(side_norm[side_idx] - angle_norm[angle_idx])
+            timing_gap = abs(float(sides.iloc[side_idx].get("release_timing_ms") or 0.0) - float(angles.iloc[angle_idx].get("release_timing_ms") or 0.0)) / 1500.0
+            height_gap = abs(float(sides.iloc[side_idx].get("release_height_ratio") or 0.0) - float(angles.iloc[angle_idx].get("release_height_ratio") or 0.0))
+            jump_gap = abs(float(sides.iloc[side_idx].get("jump_height") or 0.0) - float(angles.iloc[angle_idx].get("jump_height") or 0.0))
+            score = progress_gap * 0.55 + timing_gap * 0.25 + height_gap * 0.12 + jump_gap * 0.08
+            if best_score is None or score < best_score:
+                best_score = score
+                best_angle = angle_idx
+        if best_angle is not None:
+            used_angles.add(best_angle)
+            matches.append((side_idx, best_angle))
+
+    return matches
+
+
+def _normalized_progress(series: pd.Series) -> dict[int, float]:
+    values = pd.to_numeric(series, errors="coerce").ffill().bfill().fillna(0.0)
+    minimum = float(values.min())
+    maximum = float(values.max())
+    spread = max(1.0, maximum - minimum)
+    return {index: float((value - minimum) / spread) for index, value in enumerate(values)}
 
 
 def _merge_pair_records(side: pd.Series, angle: pd.Series, pair_index: int) -> dict[str, Any]:
