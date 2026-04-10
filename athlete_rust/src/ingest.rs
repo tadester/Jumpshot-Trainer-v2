@@ -91,6 +91,14 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
     let shot_end_frame_side = frame.column("shot_end_frame_side")?;
     let shot_start_frame_45 = frame.column("shot_start_frame_45")?;
     let shot_end_frame_45 = frame.column("shot_end_frame_45")?;
+    let elbow_flexion = frame.column("elbow_flexion").ok();
+    let knee_load = frame.column("knee_load").ok();
+    let forearm_verticality = frame.column("forearm_verticality").ok();
+    let elbow_flare = frame.column("elbow_flare").ok();
+    let release_height_ratio = frame.column("release_height_ratio").ok();
+    let release_timing_ms = frame.column("release_timing_ms").ok();
+    let release_at_apex_offset_ms = frame.column("release_at_apex_offset_ms").ok();
+    let jump_height = frame.column("jump_height").ok();
 
     let mut records = Vec::with_capacity(frame.height());
     for index in 0..frame.height() {
@@ -128,6 +136,14 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
             shot_end_frame_side: opt_i64_value(shot_end_frame_side, index),
             shot_start_frame_45: opt_i64_value(shot_start_frame_45, index),
             shot_end_frame_45: opt_i64_value(shot_end_frame_45, index),
+            elbow_flexion: elbow_flexion.and_then(|column| opt_f32_value(column, index)),
+            knee_load: knee_load.and_then(|column| opt_f32_value(column, index)),
+            forearm_verticality: forearm_verticality.and_then(|column| opt_f32_value(column, index)),
+            elbow_flare: elbow_flare.and_then(|column| opt_f32_value(column, index)),
+            release_height_ratio: release_height_ratio.and_then(|column| opt_f32_value(column, index)),
+            release_timing_ms: release_timing_ms.and_then(|column| opt_f32_value(column, index)),
+            release_at_apex_offset_ms: release_at_apex_offset_ms.and_then(|column| opt_f32_value(column, index)),
+            jump_height: jump_height.and_then(|column| opt_f32_value(column, index)),
         });
     }
     Ok(records)

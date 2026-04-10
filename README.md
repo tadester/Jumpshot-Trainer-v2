@@ -1,205 +1,322 @@
 # JumpShot Trainer
 
-JumpShot Trainer is a two-part shooting-form analysis system:
+JumpShot Trainer is a Rust-first basketball shooting analysis app with a Python ingestion pipeline.
 
-- `janitor_python/`
-  The video and data-engineering side. It ingests raw clips, runs teacher-model extraction, segments shots, computes frame and shot features, and exports Parquet.
-- `athlete_rust/`
-  The biomechanics and product side. It loads processed corpora, calibrates the athlete, scores mechanics, evaluates training readiness, and presents the review experience in a desktop app.
+It is designed to turn raw training clips into:
 
-The intended workflow is:
-
-1. upload raw clips into the Python janitor
-2. run a teacher backend such as MediaPipe + YOLOv8
-3. export processed frame/shot tables and a shared training corpus
-4. load the corpus in the Rust athlete app for review, scoring, and future training
-
-## Repository Description
+- shot-stage segmentation
+- biomechanics features
+- session audits
+- trainable Parquet corpora
+- a desktop review experience for solo shooting workouts
 
 Suggested GitHub repository description:
 
 `Rust biomechanics shooting trainer with a Python video-ingestion pipeline, MediaPipe + YOLOv8 teacher models, Parquet feature exports, and a desktop analysis dashboard.`
 
+## What The App Does
+
+The project is split into two parts:
+
+- `janitor_python/`
+  Handles raw video intake, clip metadata extraction, teacher-model processing, shot segmentation, feature extraction, and Parquet export.
+- `athlete_rust/`
+  Handles calibration, biomechanics scoring, dataset inspection, session review, and the desktop dashboard.
+
+In practical terms:
+
+1. You drop side-view and front-quarter videos into the upload inbox.
+2. Python processes those videos into frame observations and shot records.
+3. The processed records are exported into a shared training corpus.
+4. Rust reads that corpus and turns it into a review dashboard, session summaries, and model-readiness signals.
+
+## How The System Works
+
+### 1. Video Intake
+
+The Python janitor stores:
+
+- raw clip copy
+- manifest JSON
+- FPS
+- resolution
+- duration
+- orientation
+
+This creates a stable source-of-truth archive under `datasets/uploads/`.
+
+### 2. Teacher Extraction
+
+The strong teacher path is:
+
+- YOLOv8 for basketball detection
+- MediaPipe pose when available
+- automatic fallback to YOLO pose
+- automatic fallback to the built-in pose heuristic if MediaPipe and YOLO pose are unavailable
+
+This is intentionally defensive. On this macOS environment, MediaPipe task models can fail to initialize because of OpenGL service setup, so the pipeline automatically drops to YOLO pose instead of crashing the run.
+
+### 3. Shot Segmentation
+
+The janitor builds frame observations and then segments reps using:
+
+- ball-to-hand distance when ball tracking is trustworthy
+- wrist trajectory fallback when ball tracking is weak
+- stage-window cleanup that removes impossible or unstable shot windows
+
+The segmentation is still being tuned against real footage, but it is now running end-to-end on the uploaded sessions in this repo.
+
+### 4. Feature Extraction
+
+For each detected shot, the janitor computes shot-level features such as:
+
+- elbow flexion
+- knee load
+- forearm verticality
+- elbow flare
+- release height ratio
+- release timing
+- release vs apex offset
+- jump height
+
+These are written into Parquet so the Rust side can use real extracted mechanics instead of only demo values.
+
+### 5. Pairing Side + Front Sessions
+
+The corpus builder now attempts to merge same-day uploaded side/front sessions into paired records.
+
+That gives the Rust app a better combined record where:
+
+- side view contributes timing, load, and jump signals
+- front-quarter view contributes alignment, flare, and release-line signals
+
+This pairing is still heuristic. It currently matches shots by ordered sequence within the same athlete/date group.
+
+### 6. Rust Review App
+
+The Rust app reads the shared training corpus and shows:
+
+- athlete calibration
+- training readiness
+- processed session coverage
+- diagnostics
+- session audit
+- visual review panels
+- live score and coaching hints
+
+The dashboard is no longer just generic scaffolding. It now reads real uploaded-session corpus rows and surfaces processed-session summaries directly.
+
+## What “Trained” Means Right Now
+
+This part matters.
+
+The app is not yet a fully trained end-to-end vision system in the sense of:
+
+- raw video in
+- production-grade learned pose + ball + stage detector out
+- fully supervised biomechanics model trained on a large labeled corpus
+
+What it is today:
+
+- a real teacher-driven ingestion pipeline
+- a real feature-extraction pipeline
+- a real Rust desktop app reading processed biomechanics records
+- a Rust-side shot-quality scorer and training-readiness layer
+- a corpus that can now include uploaded-session data, paired-view records, and manual gold-set data
+
+So the current model stack is:
+
+- teacher models produce detections and landmarks
+- heuristics and geometry compute biomechanics features
+- Rust consumes those features for scoring and review
+
+This is the correct MVP path, because it lets the product become useful before a large supervised dataset exists.
+
+## How It Was Trained
+
+Today, the system is best described as:
+
+- teacher-labeled and feature-driven
+- not yet broadly supervised on a large custom basketball corpus
+
+The current training story is:
+
+1. Use teacher models to extract pose and ball signals from raw clips.
+2. Convert those into biomechanics features.
+3. Export them into Parquet.
+4. Use Rust to summarize dataset quality, produce training examples, and prepare for future Candle-based model training.
+
+The present Rust-side “model” is still a lightweight prototype scorer over structured shot features. It is useful for MVP feedback and UI integration, but it should not yet be described as a finished trained biomechanics model.
+
+The long-term training target is:
+
+- a larger corpus of processed uploaded sessions
+- gold validation data from manually tagged shots
+- stronger paired-view coverage
+- eventually a first true supervised Candle run on normalized feature tensors
+
+## Current Repo State
+
+Working today:
+
+- raw upload intake
+- per-clip manifest generation
+- processed frame Parquet export
+- processed shot-record Parquet export
+- shared corpus rebuild
+- uploaded-session corpus inclusion
+- paired uploaded-session record generation
+- Rust corpus ingestion
+- Rust processed-session dashboard summaries
+
+Currently validated in this repo:
+
+- 4 uploaded videos were ingested and processed
+- one side upload produced usable shot records
+- one front upload produced a larger usable shot set
+- one synthetic paired uploaded-session record was created from same-day side/front sessions
+
+Still in active tuning:
+
+- shot count realism on long sessions
+- release timing realism on sparse-stride runs
+- stronger pairing quality between independent side and front recordings
+- cleaner stage boundaries on difficult clips
+
 ## Folder Structure
 
 - `athlete_rust/`
-  Rust desktop app and analysis engine.
+  Rust desktop application and analysis engine.
 - `janitor_python/`
-  Python ingestion/export pipeline.
-- `datasets/`
-  Raw clips, annotations, derived files, and shared Parquet.
+  Python ingestion and export pipeline.
+- `datasets/uploads/`
+  Raw session archive, manifests, processed sessions, and upload inbox.
+- `datasets/calibration_20_shot/`
+  Manual or semi-manual gold-tier calibration/validation data.
+- `datasets/shared/processed/`
+  Shared Parquet corpus read by Rust.
+- `datasets/models/mediapipe/`
+  Local MediaPipe pose landmarker task models.
 - `schemas/`
-  Shared table contracts between Python and Rust.
+  Shared schema contracts.
 - `docs/`
-  Product and system notes.
+  Product and architecture notes.
 
-## Current Capabilities
+## How To Use It
 
-- raw video intake with metadata extraction
-- built-in upload/session manifest storage
-- teacher-model processing paths:
-  - OpenCV fallback teacher
-  - MediaPipe pose + YOLOv8 ball detection teacher
-- automatic shot segmentation from processed frame observations
-- shot-level biomechanical feature extraction
-- Parquet export for calibration sets and shared training corpora
-- Rust desktop review UI with calibration, diagnostics, visual review, and session audit
-- training-readiness scoring for the current corpus
-
-## Janitor Pipeline
-
-Build Parquet from your annotation templates:
+### 1. Install Python Dependencies
 
 ```bash
-cd janitor_python
-python -m venv .venv
+cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/janitor_python
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-jumpshot-janitor build-parquet --project-root .. --dataset calibration_20_shot
 ```
 
-That writes:
+### 2. Put Videos In The Upload Inbox
 
-- `datasets/calibration_20_shot/derived/shot_records.parquet`
-- `datasets/shared/processed/calibration_20_shot_shot_records.parquet`
+- side clips:
+  `/Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/datasets/uploads/inbox/side`
+- front or front-quarter clips:
+  `/Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/datasets/uploads/inbox/front`
 
-Build a broader training corpus across every dataset folder that contains `annotations/athlete_profile.json` and `annotations/shots.csv`:
+### 3. Intake Videos
 
 ```bash
-cd janitor_python
+cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/janitor_python
 source .venv/bin/activate
-jumpshot-janitor build-corpus --project-root ..
+jumpshot-janitor intake-video --project-root .. --clip /absolute/path/to/clip.mp4 --view side
 ```
 
-That writes:
+Use `--view angle45` for the front-quarter camera.
+
+### 4. Add Local Teacher Assets
+
+Recommended local assets:
+
+- `yolov8n.pt`
+- `yolov8n-pose.pt`
+- `datasets/models/mediapipe/pose_landmarker_lite.task`
+
+### 5. Process A Session
+
+```bash
+cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2
+janitor_python/.venv/bin/jumpshot-janitor strong-process \
+  --project-root . \
+  --manifest datasets/uploads/manifests/<manifest>.json \
+  --athlete-profile datasets/calibration_20_shot/annotations/athlete_profile.json \
+  --source-dataset uploaded_session \
+  --teacher-model mediapipe_yolov8_teacher \
+  --frame-stride 30 \
+  --yolo-weights yolov8n.pt \
+  --pose-weights yolov8n-pose.pt \
+  --mediapipe-model datasets/models/mediapipe/pose_landmarker_lite.task
+```
+
+Outputs are written under:
+
+- `datasets/uploads/processed/<session_id>/`
+
+### 6. Rebuild The Shared Corpus
+
+```bash
+cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2
+janitor_python/.venv/bin/jumpshot-janitor build-corpus --project-root .
+```
+
+Outputs:
 
 - `datasets/shared/processed/training_corpus.parquet`
 - `datasets/shared/processed/training_corpus.metadata.json`
 
-Upload and process a raw clip:
+### 7. Run The Rust App
 
 ```bash
-cd janitor_python
-source .venv/bin/activate
-jumpshot-janitor intake-video --project-root .. --clip /absolute/path/to/clip.mp4 --view side
-```
-
-That stores the raw video and writes a manifest under `datasets/uploads/manifests/`.
-
-Then process it with teacher-model outputs:
-
-```bash
-jumpshot-janitor process-session \
-  --project-root .. \
-  --manifest /absolute/path/to/manifest.json \
-  --athlete-profile ../datasets/calibration_20_shot/annotations/athlete_profile.json \
-  --pose-json /absolute/path/to/pose_frames.json \
-  --ball-json /absolute/path/to/ball_tracks.json \
-  --source-dataset uploaded_session \
-  --teacher-model teacher_import
-```
-
-That writes frame observations and shot records into `datasets/uploads/processed/<session_id>/`, and those processed session shot records are automatically folded into `build-corpus`.
-
-For a built-in one-command path using the OpenCV teacher backend:
-
-```bash
-jumpshot-janitor auto-process \
-  --project-root .. \
-  --manifest /absolute/path/to/manifest.json \
-  --athlete-profile ../datasets/calibration_20_shot/annotations/athlete_profile.json \
-  --source-dataset uploaded_session \
-  --teacher-model builtin_cv_teacher \
-  --frame-stride 2
-```
-
-That will:
-
-1. detect the athlete with OpenCV's built-in people detector
-2. detect the basketball with an orange-ball heuristic
-3. generate pseudo-pose landmarks frame by frame
-4. segment shot windows automatically
-5. write frame observations, teacher JSON, session JSON, and shot-record Parquet
-
-For the stronger teacher path using MediaPipe pose + YOLOv8 basketball detection:
-
-```bash
-jumpshot-janitor strong-process \
-  --project-root .. \
-  --manifest /absolute/path/to/manifest.json \
-  --athlete-profile ../datasets/calibration_20_shot/annotations/athlete_profile.json \
-  --source-dataset uploaded_session \
-  --teacher-model mediapipe_yolov8_teacher \
-  --frame-stride 2 \
-  --yolo-weights yolov8n.pt
-```
-
-The first run may download YOLOv8 weights automatically.
-
-If your installed MediaPipe package is the newer tasks-only build, place a pose landmarker model under `datasets/models/mediapipe/` or pass `--mediapipe-model /absolute/path/to/pose_landmarker.task`.
-
-If a MediaPipe `.task` model is not available, `strong-process` now degrades in this order instead of failing outright:
-
-1. MediaPipe pose + YOLOv8 ball
-2. YOLO pose + YOLOv8 ball
-3. built-in pose heuristic + YOLOv8 ball
-
-On this macOS environment, the MediaPipe task runtime may still fail to initialize its OpenGL-backed graph even when a `.task` model is present. When that happens, the janitor now falls back automatically to YOLO pose instead of aborting the session.
-
-Typical upload flow:
-
-```bash
-cd janitor_python
-source .venv/bin/activate
-jumpshot-janitor intake-video --project-root .. --clip /absolute/path/to/clip.mp4 --view side
-jumpshot-janitor strong-process --project-root .. --manifest /absolute/path/to/manifest.json --athlete-profile ../datasets/calibration_20_shot/annotations/athlete_profile.json --source-dataset uploaded_session --teacher-model mediapipe_yolov8_teacher --frame-stride 2 --yolo-weights yolov8n.pt
-jumpshot-janitor build-corpus --project-root ..
-```
-
-Recommended stronger-teacher assets:
-
-- `yolov8n.pt` for the basketball detector
-- `yolov8n-pose.pt` if you want a local pose fallback when MediaPipe has no `.task` model available
-- `pose_landmarker_full.task` or `pose_landmarker_lite.task` under `datasets/models/mediapipe/`
-
-Current local validation status:
-
-- uploaded front session processing produces shot records and feature Parquet
-- uploaded side session processing produces shot records and feature Parquet
-- the shared training corpus now includes uploaded-session rows alongside the calibration dataset
-
-## Athlete App
-
-Run the Rust desktop trainer:
-
-```bash
-cd athlete_rust
+cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/athlete_rust
 cargo run
 ```
 
-Verify the Rust workspace:
+### 8. Verify Rust Builds
 
 ```bash
-cd athlete_rust
+cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/athlete_rust
 cargo check
 ```
 
-When the shared Parquet exists, the Rust app will automatically prefer `training_corpus.parquet` on startup and fall back to the calibration set if no wider corpus has been exported yet.
+## What The Rust App Shows
+
+Calibration screen:
+
+- body geometry inputs
+- estimated wingspan
+- estimated standing reach
+- estimated camera angle
+- dataset readiness summary
+
+Dashboard:
+
+- live shot intelligence
+- training readiness
+- processed session summaries
+- diagnostics
+- shot audit
+- kinetic-chain stages
+- visual review panel
+
+## Recommended Next Steps
+
+1. Keep processing real uploaded clips and tune stage thresholds against actual shot rhythm.
+2. Capture more matched side/front sessions so pairing quality improves.
+3. Replace heuristic pairing with true multi-view synchronization.
+4. Add stronger basketball-specific ball detection weights.
+5. Train the first true Rust-side supervised model on the structured feature corpus.
 
 ## Validation
 
-- `cargo check` in `athlete_rust/`
-- Parquet export and corpus export from `janitor_python/`
-- Python teacher/session processing modules compile cleanly
+Verified recently:
 
-## Notes
-
-- The built-in OpenCV teacher is a fallback path.
-- The stronger production-oriented teacher path is `MediaPipe + YOLOv8`.
-- The 20-shot calibration set should be treated as gold-tier validation data, not the full long-term training corpus.
-
-## Recent Changes
-
-- The Rust desktop UI now includes a calibration deck, performance dashboard, visual review panels, and a training-readiness surface.
-- The Rust core now builds normalized training examples from janitor Parquet and scores whether the current dataset is ready for the first supervised training run.
-- The Python janitor now supports raw-video intake, session manifests, processed upload sessions, and a stronger MediaPipe + YOLOv8 teacher backend.
+- Python janitor modules compile cleanly
+- Rust app passes `cargo check`
+- all 4 uploaded videos were ingested and processed into session artifacts
+- the shared corpus includes uploaded-session rows and paired uploaded-session records

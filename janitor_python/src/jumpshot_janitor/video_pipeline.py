@@ -735,8 +735,8 @@ def _segment_shots(frame_df: pd.DataFrame) -> pd.DataFrame:
                 release_candidate = None
 
     if shots:
-        return pd.DataFrame(shots)
-    return _segment_shots_from_wrist_motion(frame_df)
+        return _refine_shot_windows(pd.DataFrame(shots), frame_df)
+    return _refine_shot_windows(_segment_shots_from_wrist_motion(frame_df), frame_df)
 
 
 def _segment_shots_from_wrist_motion(frame_df: pd.DataFrame) -> pd.DataFrame:
@@ -801,6 +801,84 @@ def _segment_shots_from_wrist_motion(frame_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(shots)
 
 
+def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.DataFrame:
+    if shot_df.empty:
+        return shot_df
+
+    refined_rows: list[dict[str, Any]] = []
+    last_end_frame: int | None = None
+    frame_indices = set(frame_df["frame_index"].astype(int).tolist())
+    fps_estimate = max(1.0, float(frame_df["timestamp_ms"].diff().dropna().median() or 33.0))
+
+    for _, shot in shot_df.sort_values("shot_start_frame").iterrows():
+        start_frame = int(shot["shot_start_frame"])
+        set_point_frame = int(shot["set_point_frame"])
+        release_frame = int(shot["release_frame"])
+        end_frame = int(shot["shot_end_frame"])
+        apex_frame = int(shot["apex_frame"])
+
+        start_frame = min(start_frame, set_point_frame, release_frame, end_frame)
+        end_frame = max(start_frame, set_point_frame, release_frame, end_frame)
+        if set_point_frame > release_frame:
+            set_point_frame, release_frame = release_frame, set_point_frame
+
+        window = frame_df[(frame_df["frame_index"] >= start_frame) & (frame_df["frame_index"] <= end_frame)].copy()
+        if window.empty:
+            continue
+
+        if "wrist_y" in window and window["wrist_y"].notna().any():
+            wrist_window = window[window["wrist_y"].notna()]
+            set_point_frame = int(wrist_window.loc[wrist_window["wrist_y"].idxmin()]["frame_index"])
+            after_set = wrist_window[wrist_window["frame_index"] >= set_point_frame]
+            if not after_set.empty:
+                wrist_rebound = float(after_set["wrist_y"].min()) + max(6.0, float(after_set["wrist_y"].std(ddof=0) or 0.0) * 0.75)
+                rebound_candidates = after_set[after_set["wrist_y"] >= wrist_rebound]
+                if not rebound_candidates.empty:
+                    release_frame = int(rebound_candidates.iloc[0]["frame_index"])
+
+        if "hip_y" in window and window["hip_y"].notna().any():
+            apex_frame = int(window.loc[window["hip_y"].idxmin()]["frame_index"])
+
+        if release_frame < set_point_frame:
+            release_frame = set_point_frame
+        if last_end_frame is not None and start_frame <= last_end_frame:
+            start_frame = last_end_frame + 1
+        if start_frame >= end_frame:
+            continue
+
+        duration_frames = end_frame - start_frame
+        if duration_frames < 2 or duration_frames > 180:
+            continue
+
+        release_delay_frames = release_frame - set_point_frame
+        if release_delay_frames < 0:
+            continue
+        if release_delay_frames > max(120, int(2500.0 / fps_estimate)):
+            continue
+
+        if set_point_frame not in frame_indices or release_frame not in frame_indices:
+            nearest = sorted(frame_indices, key=lambda candidate: abs(candidate - set_point_frame))
+            if nearest:
+                set_point_frame = nearest[0]
+            nearest = sorted(frame_indices, key=lambda candidate: abs(candidate - release_frame))
+            if nearest:
+                release_frame = nearest[0]
+
+        last_end_frame = end_frame
+        refined_rows.append(
+            {
+                "shot_id": f"shot_{len(refined_rows)+1:03d}",
+                "shot_start_frame": start_frame,
+                "set_point_frame": set_point_frame,
+                "release_frame": release_frame,
+                "shot_end_frame": end_frame,
+                "apex_frame": apex_frame,
+            }
+        )
+
+    return pd.DataFrame(refined_rows)
+
+
 def _extract_shot_features(
     shot_windows: pd.DataFrame,
     frame_df: pd.DataFrame,
@@ -822,12 +900,13 @@ def _extract_shot_features(
         if window.empty:
             continue
 
-        set_point = window[window["frame_index"] == shot["set_point_frame"]].iloc[0]
-        release = window[window["frame_index"] == shot["release_frame"]].iloc[0]
+        set_point = _nearest_window_row(window, int(shot["set_point_frame"]))
+        release = _nearest_window_row(window, int(shot["release_frame"]))
+        apex = _nearest_window_row(window, int(shot["apex_frame"]))
         release_time_ms = float(release["timestamp_ms"] - set_point["timestamp_ms"])
-        release_vs_apex_ms = float(
-            release["timestamp_ms"] - window[window["frame_index"] == shot["apex_frame"]].iloc[0]["timestamp_ms"]
-        )
+        if release_time_ms < 0:
+            continue
+        release_vs_apex_ms = float(release["timestamp_ms"] - apex["timestamp_ms"])
         release_height_ratio = float(release.get("release_height_px", 0.0)) / max(standing_reach * 100.0, 1.0)
         jump_height = max(0.15, min(0.7, abs(window["hip_y"].max() - window["hip_y"].min()) / max(height * 260.0, 1.0)))
 
@@ -878,6 +957,14 @@ def _extract_shot_features(
         )
 
     return pd.DataFrame(rows)
+
+
+def _nearest_window_row(window: pd.DataFrame, target_frame: int) -> pd.Series:
+    exact = window[window["frame_index"] == target_frame]
+    if not exact.empty:
+        return exact.iloc[0]
+    nearest_index = (window["frame_index"] - target_frame).abs().idxmin()
+    return window.loc[nearest_index]
 
 
 def process_session(

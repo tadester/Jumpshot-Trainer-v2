@@ -2,11 +2,11 @@ use biomech_ai::ingest::load_janitor_shot_records;
 use biomech_ai::trainer::{analyze_shot, build_training_session, default_calibration_input};
 use biomech_ai::training::{
     build_training_examples, calibration_input_from_record, evaluate_model_readiness, shot_input_from_record,
-    summarize_training_dataset,
+    summarize_processed_sessions, summarize_training_dataset,
 };
 use biomech_ai::types::{
-    CalibrationInput, DiagnosticSeverity, ModelReadiness, SessionAudit, SessionShotSummary, ShotInput,
-    ShotQualityLabel, ShotStage, StageFeedback, TrainingDatasetSummary,
+    CalibrationInput, DiagnosticSeverity, ModelReadiness, ProcessedSessionSummary, SessionAudit,
+    SessionShotSummary, ShotInput, ShotQualityLabel, ShotStage, StageFeedback, TrainingDatasetSummary,
 };
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, RichText, Stroke, Vec2};
 
@@ -41,6 +41,7 @@ struct JumpshotTrainerApp {
     dataset_status: String,
     dataset_summary: TrainingDatasetSummary,
     model_readiness: ModelReadiness,
+    processed_sessions: Vec<ProcessedSessionSummary>,
 }
 
 impl JumpshotTrainerApp {
@@ -69,12 +70,14 @@ impl JumpshotTrainerApp {
         let corpus_path = std::path::Path::new("../datasets/shared/processed/training_corpus.parquet");
         let parquet_path = std::path::Path::new("../datasets/shared/processed/calibration_20_shot_shot_records.parquet");
         let preferred_path = if corpus_path.exists() { corpus_path } else { parquet_path };
-        let (input, calibration_input, dataset_status, dataset_summary, model_readiness) = if preferred_path.exists() {
+        let (input, calibration_input, dataset_status, dataset_summary, model_readiness, processed_sessions) =
+            if preferred_path.exists() {
             match load_janitor_shot_records(preferred_path) {
                 Ok(records) if !records.is_empty() => {
                     let examples = build_training_examples(&records);
                     let summary = summarize_training_dataset(&examples);
                     let readiness = evaluate_model_readiness(&summary);
+                    let processed_sessions = summarize_processed_sessions(&records);
                     let first = &records[0];
                     (
                         shot_input_from_record(first),
@@ -82,6 +85,7 @@ impl JumpshotTrainerApp {
                         format!("Linked to janitor export at {}", preferred_path.display()),
                         summary,
                         readiness,
+                        processed_sessions,
                     )
                 }
                 Ok(_) => (
@@ -90,6 +94,7 @@ impl JumpshotTrainerApp {
                     "Janitor parquet found but empty. Using local demo state.".to_string(),
                     empty_summary.clone(),
                     evaluate_model_readiness(&empty_summary),
+                    vec![],
                 ),
                 Err(error) => (
                     default_input,
@@ -97,6 +102,7 @@ impl JumpshotTrainerApp {
                     format!("Failed to load janitor parquet: {error}"),
                     empty_summary.clone(),
                     evaluate_model_readiness(&empty_summary),
+                    vec![],
                 ),
             }
         } else {
@@ -106,6 +112,7 @@ impl JumpshotTrainerApp {
                 format!("No janitor parquet yet at {}. Using local demo state.", preferred_path.display()),
                 empty_summary.clone(),
                 evaluate_model_readiness(&empty_summary),
+                vec![],
             )
         };
 
@@ -120,6 +127,7 @@ impl JumpshotTrainerApp {
             dataset_status,
             dataset_summary,
             model_readiness,
+            processed_sessions,
         }
     }
 
@@ -298,6 +306,12 @@ impl JumpshotTrainerApp {
                     section_card(right, "Training Readiness", "Model-facing summary of what the current Parquet dataset can support.", |ui| {
                         readiness_panel(ui, &self.model_readiness);
                     });
+                });
+
+                ui.add_space(16.0);
+
+                section_card(ui, "Processed Sessions", "Uploaded sessions currently in the Rust review corpus, including paired-view coverage and teacher provenance.", |ui| {
+                    processed_sessions_panel(ui, &self.processed_sessions);
                 });
 
                 ui.add_space(16.0);
@@ -667,6 +681,52 @@ fn mini_timeline(ui: &mut egui::Ui, shots: &[SessionShotSummary]) {
             color,
         );
     }
+}
+
+fn processed_sessions_panel(ui: &mut egui::Ui, sessions: &[ProcessedSessionSummary]) {
+    if sessions.is_empty() {
+        ui.label("No processed sessions have been folded into the corpus yet.");
+        return;
+    }
+
+    for session in sessions {
+        egui::Frame::new()
+            .fill(Color32::from_rgb(23, 31, 36))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(46, 60, 68)))
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(14, 12))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(session.session_key.as_str()).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        pill_label(ui, &format!("{} shots", session.total_shots), Color32::from_rgb(36, 86, 98));
+                    });
+                });
+                ui.label(format!(
+                    "Source: {}   |   Teacher: {}",
+                    session.source_dataset, session.teacher_model
+                ));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    metric_tile_compact(ui, "Paired", session.paired_shots);
+                    metric_tile_compact(ui, "Side Only", session.side_only_shots);
+                    metric_tile_compact(ui, "Angle Only", session.angle_only_shots);
+                });
+            });
+        ui.add_space(8.0);
+    }
+}
+
+fn metric_tile_compact(ui: &mut egui::Ui, title: &str, value: usize) {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(18, 24, 29))
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_size(Vec2::new(120.0, 54.0));
+            ui.label(RichText::new(title).size(12.0).color(Color32::from_rgb(164, 176, 182)));
+            ui.label(RichText::new(value.to_string()).size(22.0).strong());
+        });
 }
 
 fn draw_calibration_preview(ui: &mut egui::Ui, calibration_input: &CalibrationInput) {

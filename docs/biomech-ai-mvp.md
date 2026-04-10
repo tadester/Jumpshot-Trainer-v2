@@ -2,92 +2,164 @@
 
 ## Product Goal
 
-Ship an MVP that converts raw uploaded basketball clips into stage-aware biomechanical diagnostics, instant rep feedback, and a trainable long-term shot corpus.
+Build a real basketball form-analysis MVP that can:
 
-## Core System
+- take uploaded shooting clips
+- estimate pose and ball motion
+- segment reps
+- compute biomechanics features
+- store those features in a trainable corpus
+- present the results in a Rust desktop review tool
 
-1. Capture Layer
-   - Record 60-120 FPS video from a tripod or live camera session.
-   - Intake raw video into the Python janitor and store a manifest with FPS, resolution, duration, and orientation.
-   - Run teacher-model inference per frame for pose and ball tracking.
-   - Timestamp all frames for latency, release timing, and jump-apex calculations.
+## System Overview
 
-2. Reference Layer
-   - Store elite baseline ranges in `athlete_rust/data/elite-shot-baselines.json`.
-   - Validate model robustness using `athlete_rust/data/environment-benchmarks.json`.
-   - Replace placeholder values with empirically labeled pro-shooter clips and teacher-processed corpora.
-
-3. Analysis Layer
-   - Detect shot stages with a Rust state machine: `ready_stance -> load -> set_point -> release -> follow_through`.
-   - Compute proportion-aware metrics including elbow flexion, knee load, forearm verticality, elbow flare, release height ratio, and release timing.
-   - Generate severity-based diagnostics for real-time overlays and post-shot audits.
-   - Convert processed shot records into normalized training examples for Rust-side training.
-
-4. Product Layer
-   - Feed diagnostics into AR overlays, angle meters, and session summaries.
-   - Persist normalized shot records for athlete history.
-   - Clip each rep to a short shot window for efficient storage and review.
-   - Surface corpus readiness so the team knows when to move from collection into supervised training.
-
-## Implemented System Split
+The product has two execution layers.
 
 ### Janitor Python
 
-- raw video intake and manifest creation
-- teacher-model processing paths
-- frame-observation and shot-record export
-- calibration-set export and shared training corpus export
+Purpose:
+
+- raw clip intake
+- video metadata extraction
+- teacher-model inference
+- shot segmentation
+- feature extraction
+- corpus export
+
+Primary outputs:
+
+- per-session frame observations
+- per-session shot records
+- shared training corpus
 
 ### Athlete Rust
 
-- calibration and normalization logic
-- biomechanics scoring and session audit logic
+Purpose:
+
+- calibration and normalization
+- shot scoring
+- dataset inspection
 - desktop review UI
-- Parquet ingestion for processed corpora
-- training-readiness summarization
+- readiness tracking for future training
 
-## Teacher Backends
+Primary outputs:
 
-1. Strong teacher
-   - MediaPipe pose
-   - YOLOv8 basketball detection
-2. Fallback teacher
-   - OpenCV people detector
-   - heuristic orange-ball detector
+- calibration deck
+- diagnostics dashboard
+- processed-session overview
+- session audit and review surfaces
 
-The strong teacher path should be the default for any meaningful training data collection.
+## Runtime Flow
 
-## MVP Deliverables Mapping
+1. User records side and front-quarter clips.
+2. Python ingests the clips and writes manifests.
+3. Teacher models estimate pose and ball behavior.
+4. Python converts detections into frame-level observations.
+5. Shot segmentation generates stage windows.
+6. Feature extraction creates shot-level biomechanics records.
+7. Corpus export writes Parquet.
+8. Rust loads the corpus and renders review and readiness UI.
 
-- Ground truth:
-  `athlete_rust/data/elite-shot-baselines.json` defines the first-pass golden-ratio baseline schema.
-- Multi-stage recognition:
-  `athlete_rust/src/analysis/state_machine.rs` detects the shot phases.
-- Biomechanical diagnostics:
-  `athlete_rust/src/analysis/diagnostics.rs` computes body-relative metrics and compares them to the pro baseline.
-- Session summary:
-  `athlete_rust/src/analysis/session_audit.rs` ranks consistency across attempts.
-- Persistence and trend analysis:
-  `athlete_rust/src/backend/persistence.rs` normalizes scores and computes improvement windows.
-- Automated clipping:
-  `athlete_rust/src/backend/video_window.rs` identifies a compact shot window.
-- Video intake and teacher processing:
-  `janitor_python/src/jumpshot_janitor/video_pipeline.py` handles raw uploads, teacher outputs, segmentation, and processed session export.
-- Shared corpus:
-  `datasets/shared/processed/training_corpus.parquet` is the Rust-readable corpus assembled from calibration sets and processed uploaded sessions.
+## Current Teacher Stack
 
-## Portfolio-Ready Outputs
+Intended strong teacher:
 
-- Diagnostic report dashboard:
-  Back the report with `MetricDiagnostic[]`, including statements like elbow flare deviation versus baseline.
-- Frame-by-frame scrubber:
-  Bind shot stage events and metric snapshots to a timeline view.
-- Latency audit:
-  Track capture FPS, inference time per frame, and total end-to-end lag in the ingestion service.
+- MediaPipe pose landmarker
+- YOLOv8 basketball detector
+
+Current resilient stack:
+
+1. MediaPipe pose + YOLOv8 ball when MediaPipe initializes
+2. YOLO pose + YOLOv8 ball when MediaPipe fails
+3. built-in pose heuristic + YOLOv8/OpenCV ball fallback when needed
+
+This fallback ladder is important because it keeps the ingestion pipeline usable on imperfect environments instead of turning every teacher failure into a hard stop.
+
+## Shot Segmentation Strategy
+
+The segmentation layer currently mixes:
+
+- ball-hand distance logic
+- wrist trajectory logic
+- cleanup rules for impossible stage orderings
+
+This is not yet a final production shot-state model, but it is materially better than a simple trigger-only approach and is now able to produce usable shot records from uploaded sessions.
+
+## Feature Set
+
+The current shot record includes:
+
+- elbow flexion
+- knee load
+- forearm verticality
+- elbow flare
+- release height ratio
+- release timing
+- release vs apex offset
+- jump height
+
+These features are the bridge between teacher-generated detections and future Rust-side supervised learning.
+
+## Pairing Strategy
+
+Uploaded sessions are now paired heuristically when:
+
+- athlete id matches
+- session date matches
+- side and front-quarter records both exist
+
+The current pairing method matches shots by ordered sequence within each same-day group. This is a practical MVP solution, but it should eventually be replaced by true multi-view synchronization.
+
+## Training Positioning
+
+The system is not yet a fully trained end-to-end biomechanics model.
+
+What it is today:
+
+- teacher-driven perception
+- feature-driven biomechanics extraction
+- a trainable corpus builder
+- a Rust-side model-readiness and review layer
+
+What remains for a real supervised model:
+
+- more paired sessions
+- more manually trusted gold validation data
+- better shot-stage ground truth
+- a first Candle-based supervised training pass
+
+## What The Rust App Now Surfaces
+
+- calibration geometry
+- live shot controls and diagnostics
+- dataset readiness
+- processed session summaries
+- paired-view coverage
+- session audit panels
+- visual review placeholders for timeline/overlay work
+
+## Current MVP Status
+
+Already working:
+
+- upload intake
+- manifest generation
+- session processing
+- corpus rebuild
+- Rust corpus ingestion
+- processed-session dashboard summaries
+
+Still being tuned:
+
+- stage realism on long sessions
+- sparse-stride timing accuracy
+- view pairing fidelity
+- final training labels and large-scale supervised fitting
 
 ## Recommended Next Build Steps
 
-1. Replace the heuristic fallback pieces with stronger production-grade teacher settings and better basketball-specific YOLO weights.
-2. Capture 60-120 FPS footage of more shooters and keep the 20-shot set as gold-tier validation.
-3. Export richer frame-level landmarks and confidence traces into the shared training corpus.
-4. Train the first Rust-side supervised model on top of the processed corpus and compare it to the current heuristic scorer.
+1. Improve segmentation thresholds using more real uploaded sessions.
+2. Add true paired-session synchronization instead of sequence-based pairing.
+3. Capture more side/front-quarter gold validation clips.
+4. Expand the corpus before the first serious Candle training run.
+5. Replace the remaining heuristic stage cleanup with a stronger temporal model.

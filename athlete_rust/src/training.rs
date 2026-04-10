@@ -1,22 +1,43 @@
 use crate::ml::infer_shot_quality;
 use crate::trainer::default_calibration_input;
 use crate::types::{
-    CalibrationInput, JanitorShotRecord, ModelReadiness, ShotInput, ShotQualityLabel, TrainingDatasetSummary,
-    TrainingExample,
+    CalibrationInput, JanitorShotRecord, ModelReadiness, ProcessedSessionSummary, ShotInput, ShotQualityLabel,
+    TrainingDatasetSummary, TrainingExample,
 };
+use std::collections::BTreeMap;
 
 pub fn shot_input_from_record(record: &JanitorShotRecord) -> ShotInput {
-    let release_timing = record.release_time_ms_side.unwrap_or(320.0).clamp(180.0, 520.0);
+    let release_timing = record
+        .release_timing_ms
+        .or(record.release_time_ms_side)
+        .or(record.release_time_ms_45)
+        .unwrap_or(320.0)
+        .clamp(180.0, 520.0);
     let distance_scale = record.distance_ft.unwrap_or(15.0) / 15.0;
     ShotInput {
-        elbow_flexion: 86.0,
-        knee_load: 106.0 + (distance_scale - 1.0) * 6.0,
-        forearm_verticality: 90.0,
-        elbow_flare: if record.paired_view_available { 4.0 } else { 6.5 },
-        release_height_ratio: (record.standing_reach_m / record.height_m.max(1.0)).clamp(1.15, 1.42),
+        elbow_flexion: record.elbow_flexion.unwrap_or(86.0).clamp(45.0, 180.0),
+        knee_load: record
+            .knee_load
+            .unwrap_or(106.0 + (distance_scale - 1.0) * 6.0)
+            .clamp(70.0, 180.0),
+        forearm_verticality: record.forearm_verticality.unwrap_or(90.0).clamp(-90.0, 100.0),
+        elbow_flare: record
+            .elbow_flare
+            .unwrap_or(if record.paired_view_available { 4.0 } else { 6.5 })
+            .clamp(0.0, 90.0),
+        release_height_ratio: record
+            .release_height_ratio
+            .unwrap_or((record.standing_reach_m / record.height_m.max(1.0)).clamp(1.15, 1.42))
+            .clamp(0.3, 1.8),
         release_timing_ms: release_timing,
-        release_at_apex_offset_ms: (release_timing - 320.0) * 0.35,
-        jump_height: (0.32 + (distance_scale - 1.0) * 0.06).clamp(0.2, 0.55),
+        release_at_apex_offset_ms: record
+            .release_at_apex_offset_ms
+            .unwrap_or((release_timing - 320.0) * 0.35)
+            .clamp(-200.0, 200.0),
+        jump_height: record
+            .jump_height
+            .unwrap_or((0.32 + (distance_scale - 1.0) * 0.06).clamp(0.2, 0.55))
+            .clamp(0.05, 0.8),
     }
 }
 
@@ -154,4 +175,47 @@ pub fn evaluate_model_readiness(summary: &TrainingDatasetSummary) -> ModelReadin
         risks,
         recommended_next_step,
     }
+}
+
+pub fn summarize_processed_sessions(records: &[JanitorShotRecord]) -> Vec<ProcessedSessionSummary> {
+    let mut groups: BTreeMap<String, Vec<&JanitorShotRecord>> = BTreeMap::new();
+    for record in records {
+        let primary_clip = if !record.side_video.is_empty() {
+            record.side_video.clone()
+        } else if !record.angle45_video.is_empty() {
+            record.angle45_video.clone()
+        } else {
+            record.clip_uid.clone()
+        };
+        let session_key = format!("{} :: {}", record.session_date, primary_clip);
+        groups.entry(session_key).or_default().push(record);
+    }
+
+    groups
+        .into_iter()
+        .map(|(session_key, items)| {
+            let total_shots = items.len();
+            let paired_shots = items.iter().filter(|item| item.paired_view_available).count();
+            let side_only_shots = items
+                .iter()
+                .filter(|item| !item.paired_view_available && !item.side_video.is_empty())
+                .count();
+            let angle_only_shots = items
+                .iter()
+                .filter(|item| !item.paired_view_available && !item.angle45_video.is_empty())
+                .count();
+            let source_dataset = items.first().map(|item| item.source_dataset.clone()).unwrap_or_default();
+            let teacher_model = items.first().map(|item| item.teacher_model.clone()).unwrap_or_default();
+
+            ProcessedSessionSummary {
+                session_key,
+                source_dataset,
+                teacher_model,
+                total_shots,
+                paired_shots,
+                side_only_shots,
+                angle_only_shots,
+            }
+        })
+        .collect()
 }

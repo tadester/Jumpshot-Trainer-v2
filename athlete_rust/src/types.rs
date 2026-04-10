@@ -242,6 +242,14 @@ pub struct JanitorShotRecord {
     pub shot_end_frame_side: Option<i64>,
     pub shot_start_frame_45: Option<i64>,
     pub shot_end_frame_45: Option<i64>,
+    pub elbow_flexion: Option<f32>,
+    pub knee_load: Option<f32>,
+    pub forearm_verticality: Option<f32>,
+    pub elbow_flare: Option<f32>,
+    pub release_height_ratio: Option<f32>,
+    pub release_timing_ms: Option<f32>,
+    pub release_at_apex_offset_ms: Option<f32>,
+    pub jump_height: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -269,4 +277,15 @@ pub struct ModelReadiness {
     pub checklist: Vec<String>,
     pub risks: Vec<String>,
     pub recommended_next_step: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProcessedSessionSummary {
+    pub session_key: String,
+    pub source_dataset: String,
+    pub teacher_model: String,
+    pub total_shots: usize,
+    pub paired_shots: usize,
+    pub side_only_shots: usize,
+    pub angle_only_shots: usize,
 }
