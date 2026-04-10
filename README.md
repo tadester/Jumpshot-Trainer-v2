@@ -136,6 +136,14 @@ jumpshot-janitor strong-process \
 
 The first run may download YOLOv8 weights automatically.
 
+If your installed MediaPipe package is the newer tasks-only build, place a pose landmarker model under `datasets/models/mediapipe/` or pass `--mediapipe-model /absolute/path/to/pose_landmarker.task`.
+
+If a MediaPipe `.task` model is not available, `strong-process` now degrades in this order instead of failing outright:
+
+1. MediaPipe pose + YOLOv8 ball
+2. YOLO pose + YOLOv8 ball
+3. built-in pose heuristic + YOLOv8 ball
+
 Typical upload flow:
 
 ```bash
@@ -145,6 +153,12 @@ jumpshot-janitor intake-video --project-root .. --clip /absolute/path/to/clip.mp
 jumpshot-janitor strong-process --project-root .. --manifest /absolute/path/to/manifest.json --athlete-profile ../datasets/calibration_20_shot/annotations/athlete_profile.json --source-dataset uploaded_session --teacher-model mediapipe_yolov8_teacher --frame-stride 2 --yolo-weights yolov8n.pt
 jumpshot-janitor build-corpus --project-root ..
 ```
+
+Recommended stronger-teacher assets:
+
+- `yolov8n.pt` for the basketball detector
+- `yolov8n-pose.pt` if you want a local pose fallback when MediaPipe has no `.task` model available
+- `pose_landmarker_full.task` or `pose_landmarker_lite.task` under `datasets/models/mediapipe/`
 
 ## Athlete App
 

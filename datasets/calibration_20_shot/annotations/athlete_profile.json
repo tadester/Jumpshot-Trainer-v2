@@ -1,14 +1,14 @@
 {
   "athlete_id": "athlete_001",
-  "name": "Sample Athlete",
+  "name": "Primary Athlete",
   "handedness": "right",
-  "height_m": 1.88,
-  "wingspan_m": 1.95,
-  "standing_reach_m": 2.46,
+  "height_m": 1.7018,
+  "wingspan_m": 1.7272,
+  "standing_reach_m": 2.2098,
   "age": 18,
   "skill_level": "high_school",
   "capture_fps": 60,
   "resolution": "3840x2160",
   "source_tier": "gold",
-  "notes": "Replace this template with the real athlete profile."
+  "notes": "Primary athlete profile captured from user-provided body measurements on April 9, 2026."
 }

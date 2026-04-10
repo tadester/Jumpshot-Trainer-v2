@@ -43,6 +43,8 @@ def main() -> None:
     strong.add_argument("--teacher-model", type=str, default="mediapipe_yolov8_teacher", help="Teacher model identifier")
     strong.add_argument("--frame-stride", type=int, default=2, help="Analyze every Nth frame")
     strong.add_argument("--yolo-weights", type=str, default="yolov8n.pt", help="YOLOv8 weights name or path")
+    strong.add_argument("--pose-weights", type=str, default="yolov8n-pose.pt", help="YOLO pose weights used if MediaPipe is unavailable")
+    strong.add_argument("--mediapipe-model", type=str, help="Optional path to a MediaPipe pose landmarker .task model")
 
     args = parser.parse_args()
 
@@ -88,6 +90,8 @@ def main() -> None:
             teacher_model=args.teacher_model,
             frame_stride=args.frame_stride,
             yolo_weights=args.yolo_weights,
+            pose_weights=args.pose_weights,
+            mediapipe_model=args.mediapipe_model,
         )
         for label, path in outputs.items():
             print(f"Wrote {label}: {path}")

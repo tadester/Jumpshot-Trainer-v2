@@ -4,8 +4,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
+import importlib
 import json
 import math
+import os
 import shutil
 import uuid
 
@@ -107,15 +109,82 @@ def _processed_session_dir(project_root: Path, session_id: str) -> Path:
 
 
 def _load_mediapipe():
+    os.environ.setdefault("MPLCONFIGDIR", str((Path.cwd() / ".mplcache").resolve()))
     import mediapipe as mp  # type: ignore
 
     return mp
 
 
 def _load_yolo():
+    os.environ.setdefault("YOLO_CONFIG_DIR", str((Path.cwd() / ".yolo_config").resolve()))
     from ultralytics import YOLO  # type: ignore
 
     return YOLO
+
+
+def _resolve_mediapipe_model(project_root: Path, explicit_path: str | None) -> Path | None:
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+
+    models_dir = project_root / "datasets" / "models" / "mediapipe"
+    candidates.extend(
+        [
+            models_dir / "pose_landmarker_heavy.task",
+            models_dir / "pose_landmarker_full.task",
+            models_dir / "pose_landmarker_lite.task",
+        ]
+    )
+
+    for candidate in candidates:
+        resolved = candidate if candidate.is_absolute() else (project_root / candidate)
+        if resolved.exists():
+            return resolved.resolve()
+    return None
+
+
+def _init_mediapipe_pose_runtime(project_root: Path, model_path: str | None) -> dict[str, Any] | None:
+    mp = _load_mediapipe()
+    if hasattr(mp, "solutions") and hasattr(mp.solutions, "pose"):
+        pose_model = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        return {
+            "backend": "mediapipe_solutions",
+            "mode": "legacy",
+            "mp": mp,
+            "model": pose_model,
+        }
+
+    resolved_model = _resolve_mediapipe_model(project_root, model_path)
+    if resolved_model is None:
+        return None
+
+    mp_python = importlib.import_module("mediapipe.tasks.python")
+    vision = importlib.import_module("mediapipe.tasks.python.vision")
+    base_options = mp_python.BaseOptions(model_asset_path=str(resolved_model))
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        output_segmentation_masks=False,
+    )
+    pose_model = vision.PoseLandmarker.create_from_options(options)
+    return {
+        "backend": "mediapipe_tasks",
+        "mode": "tasks",
+        "mp": mp,
+        "vision": vision,
+        "model": pose_model,
+        "model_path": str(resolved_model),
+    }
 
 
 def _detect_person_bbox(frame: Any, hog: cv2.HOGDescriptor) -> tuple[int, int, int, int] | None:
@@ -178,6 +247,68 @@ def _detect_ball_yolo(frame: Any, yolo_model: Any) -> dict[str, float] | None:
     }
 
 
+def _detect_pose_yolo(frame: Any, pose_model: Any, handedness: str) -> tuple[dict[str, dict[str, float]], tuple[int, int, int, int] | None] | None:
+    results = pose_model.predict(frame, verbose=False, imgsz=960, conf=0.2)
+    if not results:
+        return None
+
+    result = results[0]
+    keypoints = getattr(result, "keypoints", None)
+    if keypoints is None or keypoints.xy is None or len(keypoints.xy) == 0:
+        return None
+
+    xy = keypoints.xy.cpu().numpy()
+    boxes = getattr(result, "boxes", None)
+    if boxes is not None and boxes.conf is not None and len(boxes.conf) == len(xy):
+        confidences = boxes.conf.cpu().numpy()
+        best_index = int(confidences.argmax())
+    else:
+        best_index = 0
+
+    points = xy[best_index]
+    coco_map = {
+        "left_shoulder": 5,
+        "right_shoulder": 6,
+        "left_elbow": 7,
+        "right_elbow": 8,
+        "left_wrist": 9,
+        "right_wrist": 10,
+        "left_hip": 11,
+        "right_hip": 12,
+        "left_knee": 13,
+        "right_knee": 14,
+        "left_ankle": 15,
+        "right_ankle": 16,
+    }
+    extracted: dict[str, dict[str, float]] = {}
+    for name, index in coco_map.items():
+        x, y = points[index]
+        if x <= 0 and y <= 0:
+            continue
+        extracted[name] = {"x": float(x), "y": float(y)}
+
+    required = {
+        "left_shoulder",
+        "right_shoulder",
+        "left_elbow",
+        "right_elbow",
+        "left_wrist",
+        "right_wrist",
+        "left_hip",
+        "right_hip",
+        "left_knee",
+        "right_knee",
+        "left_ankle",
+        "right_ankle",
+    }
+    if not required.issubset(extracted.keys()):
+        return None
+
+    handed = "right" if handedness.lower().startswith("r") else "left"
+    extracted[f"{handed}_shooting_line"] = extracted[f"{handed}_wrist"]
+    return extracted, _bbox_from_keypoints(extracted)
+
+
 def _pseudo_pose_from_bbox(
     bbox: tuple[int, int, int, int],
     ball: dict[str, float] | None,
@@ -234,41 +365,57 @@ def _bbox_from_keypoints(keypoints: dict[str, dict[str, float]]) -> tuple[int, i
     return int(x_min), int(y_min), int(max(1.0, x_max - x_min)), int(max(1.0, y_max - y_min))
 
 
-def _detect_pose_mediapipe(frame: Any, pose_model: Any, handedness: str) -> tuple[dict[str, dict[str, float]], tuple[int, int, int, int] | None] | None:
-    mp = _load_mediapipe()
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = pose_model.process(rgb)
-    if not results.pose_landmarks:
-        return None
-
+def _detect_pose_mediapipe(
+    frame: Any,
+    pose_runtime: dict[str, Any],
+    handedness: str,
+    timestamp_ms: int,
+) -> tuple[dict[str, dict[str, float]], tuple[int, int, int, int] | None] | None:
+    mp = pose_runtime["mp"]
     height, width = frame.shape[:2]
-    raw_landmarks = results.pose_landmarks.landmark
 
-    def point(index: int) -> dict[str, float]:
-        landmark = raw_landmarks[index]
-        return {"x": float(landmark.x * width), "y": float(landmark.y * height)}
+    if pose_runtime["mode"] == "legacy":
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose_runtime["model"].process(rgb)
+        if not results.pose_landmarks:
+            return None
+        raw_landmarks = results.pose_landmarks.landmark
+
+        def point(index: int) -> dict[str, float]:
+            landmark = raw_landmarks[index]
+            return {"x": float(landmark.x * width), "y": float(landmark.y * height)}
+
+        pose_landmark = mp.solutions.pose.PoseLandmark
+    else:
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        results = pose_runtime["model"].detect_for_video(image, timestamp_ms)
+        if not results.pose_landmarks:
+            return None
+        raw_landmarks = results.pose_landmarks[0]
+
+        def point(index: int) -> dict[str, float]:
+            landmark = raw_landmarks[index]
+            return {"x": float(landmark.x * width), "y": float(landmark.y * height)}
+
+        pose_landmark = pose_runtime["vision"].PoseLandmark
 
     keypoints = {
-        "left_shoulder": point(mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value),
-        "right_shoulder": point(mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER.value),
-        "left_elbow": point(mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value),
-        "right_elbow": point(mp.solutions.pose.PoseLandmark.RIGHT_ELBOW.value),
-        "left_wrist": point(mp.solutions.pose.PoseLandmark.LEFT_WRIST.value),
-        "right_wrist": point(mp.solutions.pose.PoseLandmark.RIGHT_WRIST.value),
-        "left_hip": point(mp.solutions.pose.PoseLandmark.LEFT_HIP.value),
-        "right_hip": point(mp.solutions.pose.PoseLandmark.RIGHT_HIP.value),
-        "left_knee": point(mp.solutions.pose.PoseLandmark.LEFT_KNEE.value),
-        "right_knee": point(mp.solutions.pose.PoseLandmark.RIGHT_KNEE.value),
-        "left_ankle": point(mp.solutions.pose.PoseLandmark.LEFT_ANKLE.value),
-        "right_ankle": point(mp.solutions.pose.PoseLandmark.RIGHT_ANKLE.value),
+        "left_shoulder": point(int(pose_landmark.LEFT_SHOULDER)),
+        "right_shoulder": point(int(pose_landmark.RIGHT_SHOULDER)),
+        "left_elbow": point(int(pose_landmark.LEFT_ELBOW)),
+        "right_elbow": point(int(pose_landmark.RIGHT_ELBOW)),
+        "left_wrist": point(int(pose_landmark.LEFT_WRIST)),
+        "right_wrist": point(int(pose_landmark.RIGHT_WRIST)),
+        "left_hip": point(int(pose_landmark.LEFT_HIP)),
+        "right_hip": point(int(pose_landmark.RIGHT_HIP)),
+        "left_knee": point(int(pose_landmark.LEFT_KNEE)),
+        "right_knee": point(int(pose_landmark.RIGHT_KNEE)),
+        "left_ankle": point(int(pose_landmark.LEFT_ANKLE)),
+        "right_ankle": point(int(pose_landmark.RIGHT_ANKLE)),
     }
 
     handed = "right" if handedness.lower().startswith("r") else "left"
-    if handed == "right":
-        keypoints["right_shooting_line"] = keypoints["right_wrist"]
-    else:
-        keypoints["left_shooting_line"] = keypoints["left_wrist"]
-
+    keypoints[f"{handed}_shooting_line"] = keypoints[f"{handed}_wrist"]
     return keypoints, _bbox_from_keypoints(keypoints)
 
 
@@ -337,6 +484,8 @@ def run_strong_teacher(
     athlete_profile_path: Path,
     frame_stride: int = 2,
     yolo_weights: str = "yolov8n.pt",
+    pose_weights: str = "yolov8n-pose.pt",
+    mediapipe_model: str | None = None,
 ) -> dict[str, Path]:
     manifest_data = json.loads(manifest_path.read_text())
     manifest = VideoManifest(**manifest_data)
@@ -345,16 +494,21 @@ def run_strong_teacher(
     if not capture.isOpened():
         raise RuntimeError(f"Failed to open stored clip: {manifest.stored_path}")
 
-    mp = _load_mediapipe()
     YOLO = _load_yolo()
     yolo_model = YOLO(yolo_weights)
-    pose_model = mp.solutions.pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        enable_segmentation=False,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
+    pose_runtime = _init_mediapipe_pose_runtime(project_root, mediapipe_model)
+    yolo_pose_model = None
+    pose_backend = "mediapipe_pose"
+    pose_fallback_reason: str | None = None
+    if pose_runtime is None:
+        try:
+            yolo_pose_model = YOLO(pose_weights)
+            pose_backend = "yolov8_pose_fallback"
+        except Exception as exc:
+            pose_backend = "builtin_cv_pose_fallback"
+            pose_fallback_reason = str(exc)
+    else:
+        pose_backend = pose_runtime["backend"]
 
     pose_frames: list[dict[str, Any]] = []
     ball_frames: list[dict[str, Any]] = []
@@ -371,7 +525,12 @@ def run_strong_teacher(
             frame_index += 1
             continue
 
-        pose_detected = _detect_pose_mediapipe(frame, pose_model, handedness)
+        timestamp_ms = int(frame_index / max(manifest.fps, 1.0) * 1000.0)
+        pose_detected = None
+        if pose_runtime is not None:
+            pose_detected = _detect_pose_mediapipe(frame, pose_runtime, handedness, timestamp_ms)
+        elif yolo_pose_model is not None:
+            pose_detected = _detect_pose_yolo(frame, yolo_pose_model, handedness)
         ball = _detect_ball_yolo(frame, yolo_model) or _detect_ball(frame)
         bbox: tuple[int, int, int, int] | None = None
         keypoints: dict[str, dict[str, float]] | None = None
@@ -387,7 +546,7 @@ def run_strong_teacher(
             pose_frames.append(
                 {
                     "frame_index": frame_index,
-                    "timestamp_ms": frame_index / max(manifest.fps, 1.0) * 1000.0,
+                    "timestamp_ms": float(timestamp_ms),
                     "bbox": {"x": bbox[0], "y": bbox[1], "w": bbox[2], "h": bbox[3]} if bbox else None,
                     "keypoints": keypoints,
                 }
@@ -405,11 +564,23 @@ def run_strong_teacher(
         frame_index += 1
 
     capture.release()
-    pose_model.close()
+    if pose_runtime is not None and hasattr(pose_runtime["model"], "close"):
+        pose_runtime["model"].close()
     session_dir = _processed_session_dir(project_root, manifest.session_id)
     pose_json = session_dir / f"{manifest.clip_id}_teacher_pose.json"
     ball_json = session_dir / f"{manifest.clip_id}_teacher_ball.json"
-    pose_json.write_text(json.dumps({"backend": "mediapipe_pose", "frames": pose_frames}, indent=2))
+    pose_json.write_text(
+        json.dumps(
+            {
+                "backend": pose_backend,
+                "requested_backend": "mediapipe_yolov8_teacher",
+                "mediapipe_model": str(_resolve_mediapipe_model(project_root, mediapipe_model)) if pose_runtime is not None and pose_runtime["mode"] == "tasks" else None,
+                "pose_fallback_reason": pose_fallback_reason,
+                "frames": pose_frames,
+            },
+            indent=2,
+        )
+    )
     ball_json.write_text(json.dumps({"backend": "yolov8_ball", "frames": ball_frames}, indent=2))
     return {"pose_json": pose_json, "ball_json": ball_json}
 
@@ -724,6 +895,8 @@ def auto_process_session_strong(
     teacher_model: str,
     frame_stride: int = 2,
     yolo_weights: str = "yolov8n.pt",
+    pose_weights: str = "yolov8n-pose.pt",
+    mediapipe_model: str | None = None,
 ) -> dict[str, Path]:
     teacher_outputs = run_strong_teacher(
         project_root=project_root,
@@ -731,6 +904,8 @@ def auto_process_session_strong(
         athlete_profile_path=athlete_profile_path,
         frame_stride=frame_stride,
         yolo_weights=yolo_weights,
+        pose_weights=pose_weights,
+        mediapipe_model=mediapipe_model,
     )
     processed = process_session(
         project_root=project_root,

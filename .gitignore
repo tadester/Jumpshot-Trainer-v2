@@ -1,3 +1,9 @@
+.DS_Store
+.mplcache/
+.yolo_config/
+Jumpshot-Trainer-v2/
+yolov8*.pt
+
 node_modules/
 target/
 janitor_python/.venv/
@@ -6,5 +12,12 @@ __pycache__/
 
 datasets/*/derived/
 datasets/shared/processed/
+datasets/uploads/manifests/*.json
+datasets/uploads/raw/
+datasets/uploads/processed/
+datasets/uploads/inbox/front/*
+datasets/uploads/inbox/side/*
 
 !.gitkeep
+!datasets/uploads/inbox/front/.gitkeep
+!datasets/uploads/inbox/side/.gitkeep
