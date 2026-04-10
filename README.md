@@ -144,6 +144,8 @@ If a MediaPipe `.task` model is not available, `strong-process` now degrades in 
 2. YOLO pose + YOLOv8 ball
 3. built-in pose heuristic + YOLOv8 ball
 
+On this macOS environment, the MediaPipe task runtime may still fail to initialize its OpenGL-backed graph even when a `.task` model is present. When that happens, the janitor now falls back automatically to YOLO pose instead of aborting the session.
+
 Typical upload flow:
 
 ```bash
@@ -159,6 +161,12 @@ Recommended stronger-teacher assets:
 - `yolov8n.pt` for the basketball detector
 - `yolov8n-pose.pt` if you want a local pose fallback when MediaPipe has no `.task` model available
 - `pose_landmarker_full.task` or `pose_landmarker_lite.task` under `datasets/models/mediapipe/`
+
+Current local validation status:
+
+- uploaded front session processing produces shot records and feature Parquet
+- uploaded side session processing produces shot records and feature Parquet
+- the shared training corpus now includes uploaded-session rows alongside the calibration dataset
 
 ## Athlete App
 

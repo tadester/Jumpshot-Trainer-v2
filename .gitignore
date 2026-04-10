@@ -3,6 +3,7 @@
 .yolo_config/
 Jumpshot-Trainer-v2/
 yolov8*.pt
+datasets/models/mediapipe/*.task
 
 node_modules/
 target/

@@ -166,7 +166,10 @@ def _init_mediapipe_pose_runtime(project_root: Path, model_path: str | None) -> 
 
     mp_python = importlib.import_module("mediapipe.tasks.python")
     vision = importlib.import_module("mediapipe.tasks.python.vision")
-    base_options = mp_python.BaseOptions(model_asset_path=str(resolved_model))
+    base_options = mp_python.BaseOptions(
+        model_asset_path=str(resolved_model),
+        delegate=mp_python.BaseOptions.Delegate.CPU,
+    )
     options = vision.PoseLandmarkerOptions(
         base_options=base_options,
         running_mode=vision.RunningMode.VIDEO,
@@ -176,7 +179,10 @@ def _init_mediapipe_pose_runtime(project_root: Path, model_path: str | None) -> 
         min_tracking_confidence=0.5,
         output_segmentation_masks=False,
     )
-    pose_model = vision.PoseLandmarker.create_from_options(options)
+    try:
+        pose_model = vision.PoseLandmarker.create_from_options(options)
+    except Exception:
+        return None
     return {
         "backend": "mediapipe_tasks",
         "mode": "tasks",
@@ -203,10 +209,13 @@ def _detect_person_bbox(frame: Any, hog: cv2.HOGDescriptor) -> tuple[int, int, i
 
 
 def _detect_ball(frame: Any) -> dict[str, float] | None:
+    height, width = frame.shape[:2]
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     lower = (5, 110, 110)
     upper = (25, 255, 255)
     mask = cv2.inRange(hsv, lower, upper)
+    mask = cv2.erode(mask, None, iterations=1)
+    mask = cv2.dilate(mask, None, iterations=2)
     mask = cv2.GaussianBlur(mask, (9, 9), 0)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -218,10 +227,16 @@ def _detect_ball(frame: Any) -> dict[str, float] | None:
         return None
 
     (x, y), radius = cv2.minEnclosingCircle(contour)
+    if radius < 4.0 or radius > min(width, height) * 0.12:
+        return None
+    if area > (width * height) * 0.02:
+        return None
     circularity = 0.0
     perimeter = cv2.arcLength(contour, True)
     if perimeter > 0:
         circularity = 4 * math.pi * area / (perimeter * perimeter)
+    if circularity < 0.45:
+        return None
     confidence = min(0.99, max(0.15, circularity))
     return {"x": float(x), "y": float(y), "radius": float(radius), "confidence": float(confidence)}
 
@@ -239,6 +254,9 @@ def _detect_ball_yolo(frame: Any, yolo_model: Any) -> dict[str, float] | None:
     best_index = int(confs.argmax())
     x1, y1, x2, y2 = xyxy[best_index]
     radius = max((x2 - x1), (y2 - y1)) / 2.0
+    height, width = frame.shape[:2]
+    if radius < 4.0 or radius > min(width, height) * 0.18:
+        return None
     return {
         "x": float((x1 + x2) / 2.0),
         "y": float((y1 + y2) / 2.0),
@@ -715,6 +733,70 @@ def _segment_shots(frame_df: pd.DataFrame) -> pd.DataFrame:
                 )
                 active_start = None
                 release_candidate = None
+
+    if shots:
+        return pd.DataFrame(shots)
+    return _segment_shots_from_wrist_motion(frame_df)
+
+
+def _segment_shots_from_wrist_motion(frame_df: pd.DataFrame) -> pd.DataFrame:
+    if "wrist_y" not in frame_df or frame_df["wrist_y"].notna().sum() < 8:
+        return pd.DataFrame()
+
+    wrist_df = frame_df[frame_df["wrist_y"].notna()].copy()
+    if wrist_df.empty:
+        return pd.DataFrame()
+
+    baseline = float(wrist_df["wrist_y"].median())
+    activation_margin = max(18.0, float((wrist_df["wrist_y"].quantile(0.75) - wrist_df["wrist_y"].quantile(0.25)) * 0.5))
+    release_margin = max(6.0, activation_margin * 0.35)
+    shots: list[dict[str, Any]] = []
+    active_start: int | None = None
+    set_point_frame: int | None = None
+    min_wrist_y: float | None = None
+
+    rows = list(wrist_df.itertuples(index=False))
+    for index, row in enumerate(rows):
+        frame_index = int(row.frame_index)
+        wrist_y = float(row.wrist_y)
+
+        if active_start is None:
+            if wrist_y < baseline - activation_margin:
+                active_start = frame_index
+                set_point_frame = frame_index
+                min_wrist_y = wrist_y
+            continue
+
+        if min_wrist_y is None or wrist_y < min_wrist_y:
+            min_wrist_y = wrist_y
+            set_point_frame = frame_index
+
+        if set_point_frame is not None and frame_index > set_point_frame and wrist_y > min_wrist_y + release_margin:
+            release_frame = frame_index
+            trailing = rows[index + 1 : index + 7]
+            shot_end_frame = frame_index
+            for trailing_row in trailing:
+                shot_end_frame = int(trailing_row.frame_index)
+                if float(trailing_row.wrist_y) >= baseline - release_margin:
+                    break
+
+            window = wrist_df[
+                (wrist_df["frame_index"] >= active_start) & (wrist_df["frame_index"] <= shot_end_frame)
+            ]
+            apex_row = window.loc[window["hip_y"].idxmin()] if "hip_y" in window and window["hip_y"].notna().any() else window.iloc[0]
+            shots.append(
+                {
+                    "shot_id": f"shot_{len(shots)+1:03d}",
+                    "shot_start_frame": active_start,
+                    "set_point_frame": int(set_point_frame),
+                    "release_frame": int(release_frame),
+                    "shot_end_frame": int(shot_end_frame),
+                    "apex_frame": int(apex_row["frame_index"]),
+                }
+            )
+            active_start = None
+            set_point_frame = None
+            min_wrist_y = None
 
     return pd.DataFrame(shots)
 
