@@ -61,12 +61,13 @@ This is intentionally defensive. On this macOS environment, MediaPipe task model
 The janitor builds frame observations and then segments reps using:
 
 - ball-to-hand distance when ball tracking is trustworthy
+- a multi-signal fallback that scores likely set points using wrist lift, release height, and jump motion together
 - wrist trajectory fallback when ball tracking is weak
 - stage-window cleanup that removes impossible or unstable shot windows
 
 The segmentation is still being tuned against real footage, but it is now running end-to-end on the uploaded sessions in this repo.
 
-For difficult clips, the janitor also supports clip-specific session tuning with manual stage seeds. That path is now used for the weakest uploaded sessions in this repo.
+For difficult clips, the janitor also supports clip-specific session tuning with manual stage seeds. That is now a last-resort rescue path instead of the only way to recover weak sessions.
 
 ### 4. Feature Extraction
 
@@ -178,7 +179,7 @@ Currently validated in this repo:
 - 4 uploaded videos were ingested and processed
 - one side upload produced usable shot records
 - one front upload produced a larger usable shot set
-- the two originally weak uploaded sessions were rescued with clip-specific tuning and now each contribute usable shot records
+- the two originally weak uploaded sessions now auto-segment into usable shot records without manual seeds
 - the shared corpus now includes manual-seeded rescue shots in addition to teacher-only shots
 - multiple paired uploaded-session records are now created from same-day side/front sessions
 
@@ -280,7 +281,7 @@ janitor_python/.venv/bin/jumpshot-janitor strong-process \
   --tuning datasets/uploads/tuning/<session>.json
 ```
 
-The tuning file can provide manual shot seeds when the default segmenter still fails to recover usable rep windows.
+The tuning file can provide manual shot seeds when the stronger automatic segmenter still fails to recover usable rep windows.
 Those rescue shots are preserved in the corpus with `has_manual_stage_tags=true`, and the Rust app now calls them out directly in the session browser.
 
 ### 6. Rebuild The Shared Corpus
@@ -346,5 +347,5 @@ Verified recently:
 - Python janitor modules compile cleanly
 - Rust app passes `cargo check`
 - all 4 uploaded videos were ingested and processed into session artifacts
-- the two weakest uploaded sessions were rescued with manual stage seeding
-- the shared corpus now has 44 rows, including uploaded-session rows, paired uploaded-session records, and manual-stage-tagged rescue shots
+- the two weakest uploaded sessions now auto-segment without manual stage seeding
+- the shared corpus includes uploaded-session rows, paired uploaded-session records, and manual-stage-tagged rescue support when needed

@@ -740,8 +740,15 @@ def _segment_shots(frame_df: pd.DataFrame) -> pd.DataFrame:
                 active_start = None
                 release_candidate = None
 
+    multisignal_windows = _refine_shot_windows(_segment_shots_from_multisignal(frame_df), frame_df)
     if shots:
-        return _refine_shot_windows(pd.DataFrame(shots), frame_df)
+        refined_primary = _refine_shot_windows(pd.DataFrame(shots), frame_df)
+        if not refined_primary.empty:
+            if len(refined_primary) <= 1 and len(multisignal_windows) > len(refined_primary):
+                return multisignal_windows
+            return refined_primary
+    if not multisignal_windows.empty:
+        return multisignal_windows
     wrist_motion = _segment_shots_from_wrist_motion(frame_df)
     refined_wrist_motion = _refine_shot_windows(wrist_motion, frame_df)
     if not refined_wrist_motion.empty:
@@ -915,6 +922,93 @@ def _segment_shots_from_cycles(frame_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(shots)
 
 
+def _segment_shots_from_multisignal(frame_df: pd.DataFrame) -> pd.DataFrame:
+    if "wrist_y" not in frame_df or frame_df["wrist_y"].notna().sum() < 8:
+        return pd.DataFrame()
+
+    wrist_df = frame_df[frame_df["wrist_y"].notna()].copy().sort_values("frame_index").reset_index(drop=True)
+    if wrist_df.empty:
+        return pd.DataFrame()
+
+    smoothed_wrist = wrist_df["wrist_y"].rolling(window=5, min_periods=1, center=True).median()
+    smoothed_release_height = wrist_df["release_height_px"].rolling(window=5, min_periods=1, center=True).median()
+    smoothed_release_height = smoothed_release_height.fillna(0.0)
+    smoothed_hip = (
+        wrist_df["hip_y"].rolling(window=5, min_periods=1, center=True).median()
+        if "hip_y" in wrist_df and wrist_df["hip_y"].notna().any()
+        else pd.Series([0.0] * len(wrist_df))
+    )
+
+    wrist_baseline = float(smoothed_wrist.quantile(0.62))
+    wrist_low = float(smoothed_wrist.quantile(0.20))
+    release_height_high = float(smoothed_release_height.quantile(0.78))
+    hip_baseline = float(smoothed_hip.quantile(0.65)) if len(smoothed_hip) else 0.0
+    frame_spacing = int(max(1.0, float(wrist_df["frame_index"].diff().dropna().median() or 30.0)))
+    min_separation = max(210, frame_spacing * 7)
+
+    shots: list[dict[str, Any]] = []
+    last_set_point_frame = -min_separation
+
+    for index in range(1, len(wrist_df) - 1):
+        current_wrist = float(smoothed_wrist.iloc[index])
+        previous_wrist = float(smoothed_wrist.iloc[index - 1])
+        next_wrist = float(smoothed_wrist.iloc[index + 1])
+        current_raw_wrist = float(wrist_df.loc[index, "wrist_y"])
+        frame_index = int(wrist_df.loc[index, "frame_index"])
+
+        if not (current_wrist <= previous_wrist and current_wrist <= next_wrist):
+            continue
+
+        prominence = max(previous_wrist, next_wrist) - current_wrist
+        current_release_height = float(smoothed_release_height.iloc[index])
+        current_hip = float(smoothed_hip.iloc[index])
+
+        if current_wrist > wrist_low and prominence < 120.0 and current_release_height < release_height_high:
+            continue
+
+        score = 0.0
+        score += max(0.0, (wrist_baseline - current_wrist) / max(wrist_baseline - wrist_low, 1.0))
+        score += max(0.0, (current_release_height - release_height_high) / max(release_height_high, 1.0))
+        score += max(0.0, (hip_baseline - current_hip) / max(abs(hip_baseline), 1.0))
+        score += prominence / 160.0
+
+        if score < 2.4 or frame_index <= min_separation or frame_index - last_set_point_frame < min_separation:
+            continue
+
+        rebound = max(55.0, prominence * 0.35)
+        release_index: int | None = None
+        for candidate in range(index + 1, min(len(wrist_df), index + 6)):
+            if float(wrist_df.loc[candidate, "wrist_y"]) >= current_raw_wrist + rebound:
+                release_index = candidate
+                break
+        if release_index is None:
+            continue
+
+        start_index = max(0, index - 1)
+        for candidate in range(index - 1, max(-1, index - 5), -1):
+            if float(wrist_df.loc[candidate, "wrist_y"]) >= current_raw_wrist + rebound * 0.5:
+                start_index = candidate
+                break
+
+        end_index = min(len(wrist_df) - 1, release_index + 1)
+        local_hip = smoothed_hip.iloc[start_index : end_index + 1]
+        apex_index = start_index + int(local_hip.reset_index(drop=True).idxmin()) if not local_hip.empty else index
+
+        shots.append(
+            {
+                "shot_id": f"shot_{len(shots)+1:03d}",
+                "shot_start_frame": int(wrist_df.loc[start_index, "frame_index"]),
+                "set_point_frame": frame_index,
+                "release_frame": int(wrist_df.loc[release_index, "frame_index"]),
+                "shot_end_frame": int(wrist_df.loc[end_index, "frame_index"]),
+                "apex_frame": int(wrist_df.loc[apex_index, "frame_index"]),
+            }
+        )
+        last_set_point_frame = frame_index
+
+    return pd.DataFrame(shots)
+
+
 def _segment_shots_from_valleys(frame_df: pd.DataFrame) -> pd.DataFrame:
     if "wrist_y" not in frame_df or frame_df["wrist_y"].notna().sum() < 8:
         return pd.DataFrame()
@@ -973,7 +1067,7 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
     refined_rows: list[dict[str, Any]] = []
     last_end_frame: int | None = None
     frame_indices = set(frame_df["frame_index"].astype(int).tolist())
-    fps_estimate = max(1.0, float(frame_df["timestamp_ms"].diff().dropna().median() or 33.0))
+    frame_interval_ms = max(1.0, float(frame_df["timestamp_ms"].diff().dropna().median() or 33.0))
 
     for _, shot in shot_df.sort_values("shot_start_frame").iterrows():
         start_frame = int(shot["shot_start_frame"])
@@ -1035,18 +1129,6 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
         if start_frame >= end_frame:
             continue
 
-        duration_frames = end_frame - start_frame
-        if duration_frames < 2 or duration_frames > 180:
-            continue
-
-        release_delay_frames = release_frame - set_point_frame
-        if release_delay_frames < 0:
-            continue
-        if release_delay_frames > max(120, int(2500.0 / fps_estimate)):
-            continue
-        if release_delay_frames > duration_frames:
-            continue
-
         if set_point_frame not in frame_indices or release_frame not in frame_indices:
             nearest = sorted(frame_indices, key=lambda candidate: abs(candidate - set_point_frame))
             if nearest:
@@ -1054,6 +1136,24 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
             nearest = sorted(frame_indices, key=lambda candidate: abs(candidate - release_frame))
             if nearest:
                 release_frame = nearest[0]
+
+        start_row = _nearest_window_row(window, start_frame)
+        end_row = _nearest_window_row(window, end_frame)
+        set_row = _nearest_window_row(window, set_point_frame)
+        release_row = _nearest_window_row(window, release_frame)
+
+        duration_ms = float(end_row["timestamp_ms"] - start_row["timestamp_ms"])
+        release_delay_ms = float(release_row["timestamp_ms"] - set_row["timestamp_ms"])
+        min_duration_ms = max(frame_interval_ms * 2.0, 80.0)
+        max_duration_ms = max(4500.0, frame_interval_ms * 10.0)
+        max_release_delay_ms = max(2500.0, frame_interval_ms * 3.5)
+
+        if duration_ms < min_duration_ms or duration_ms > max_duration_ms:
+            continue
+        if release_delay_ms < 0.0 or release_delay_ms > max_release_delay_ms:
+            continue
+        if release_delay_ms > duration_ms:
+            continue
 
         last_end_frame = end_frame
         refined_rows.append(

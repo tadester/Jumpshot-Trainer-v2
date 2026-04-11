@@ -100,6 +100,13 @@ The current shot record includes:
 
 These features are the bridge between teacher-generated detections and future Rust-side supervised learning.
 
+The current segmenter is now layered:
+
+- ball-first segmentation when ball-hand separation is reliable
+- multi-signal stage fallback using wrist lift, release height, and jump motion
+- wrist-only and cycle/valley fallbacks after that
+- manual seeding only when those automatic stages still fail
+
 ## Pairing Strategy
 
 Uploaded sessions are now paired heuristically when:
@@ -158,6 +165,7 @@ Still being tuned:
 - sparse-stride timing accuracy
 - view pairing fidelity
 - reducing how often weak-session recovery needs manual seeding
+- continuing to improve automatic recovery on weak or sparse clips so manual seeding becomes rare
 - final training labels and large-scale supervised fitting
 
 ## Recommended Next Build Steps
