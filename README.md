@@ -4,6 +4,14 @@ JumpShot Trainer is a Rust-first biomechanical jump-shot analyzer with a Python 
 
 It takes raw shooting footage, extracts pose and ball signals, segments shots, computes mechanics, exports a shared Parquet corpus, and opens everything in a native Rust desktop review app.
 
+The desktop experience is built around one main flow:
+
+1. launch the app
+2. drop in a video or paste a video path
+3. choose the camera angle
+4. click `Analyze Video`
+5. get coaching feedback on what is wrong and what to adjust
+
 Suggested GitHub repository description:
 
 `Rust biomechanics shooting trainer with a Python video-ingestion pipeline, MediaPipe + YOLOv8 teacher models, Parquet feature exports, and a desktop analysis dashboard.`
@@ -22,7 +30,7 @@ In practice, the flow is:
 1. Record shooting footage from side and front-quarter angles.
 2. Intake and process the videos with the Python janitor.
 3. Rebuild the shared training corpus.
-4. Launch the Rust desktop app to review shots and sessions.
+4. Launch the Rust desktop app and analyze a clip from a focused upload-and-review screen.
 
 ## Current Capabilities
 
@@ -36,8 +44,8 @@ Working today:
 - biomechanics feature extraction
 - Parquet corpus generation
 - side/front pairing heuristics
-- Rust desktop dashboard
-- session browser and per-shot drill-down
+- focused desktop upload-and-analyze flow
+- per-shot coaching review
 - lightweight supervised Rust-side scoring
 
 Current extracted mechanics include:
@@ -140,6 +148,13 @@ cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/athlete_rust
 cargo run
 ```
 
+When the app opens:
+
+1. drag a video into the window or paste its full path
+2. choose `Side View` or `Front Quarter`
+3. click `Analyze Video`
+4. review the detected shots, coaching adjustments, phase feedback, and mechanical snapshot
+
 ### 8. Verify Everything Builds
 
 ```bash
@@ -239,15 +254,14 @@ Long-term improvements still wanted:
 
 The Rust desktop app currently includes:
 
-- calibration inputs
-- estimated wingspan, reach, and camera geometry
-- dataset readiness
-- processed-session summaries
-- shot browser
-- live shot controls
-- session audit panels
-- diagnostic metrics
-- supervised score summary
+- a focused upload panel
+- background processing status
+- per-shot review after analysis
+- coaching adjustments
+- phase feedback
+- mechanical snapshot cards
+- a visual overlay review panel
+- hidden engine details for corpus and model background status
 
 ## Current Repo State
 

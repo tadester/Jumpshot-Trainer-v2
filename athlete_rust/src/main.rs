@@ -1,22 +1,24 @@
 use biomech_ai::ingest::load_janitor_shot_records;
-use biomech_ai::trainer::{analyze_shot, build_training_session, default_calibration_input};
+use biomech_ai::trainer::{analyze_shot, TrainerSnapshot};
 use biomech_ai::training::{
-    build_training_examples, calibration_input_from_record, evaluate_model_readiness, feature_vector_from_shot_input,
-    predict_supervised_score, shot_input_from_record, summarize_processed_sessions, summarize_training_dataset,
-    train_supervised_score_model,
+    build_training_examples, calibration_input_from_record, feature_vector_from_shot_input,
+    predict_supervised_score, shot_input_from_record, summarize_training_dataset, train_supervised_score_model,
 };
 use biomech_ai::types::{
-    CalibrationInput, DiagnosticSeverity, ModelReadiness, ProcessedSessionSummary, SessionAudit,
-    SessionShotSummary, ShotInput, ShotQualityLabel, ShotStage, StageFeedback, SupervisedModelSummary,
-    TrainingDatasetSummary, JanitorShotRecord,
+    CalibrationInput, DiagnosticSeverity, JanitorShotRecord, ShotInput, ShotStage, StageFeedback,
+    SupervisedModelSummary, TrainingDatasetSummary,
 };
-use eframe::egui::{self, Align2, Color32, FontFamily, FontId, RichText, Stroke, Vec2};
+use eframe::egui::{self, Align2, Color32, FontId, RichText, Stroke, Vec2};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1540.0, 980.0])
-            .with_min_inner_size([1280.0, 820.0])
+            .with_inner_size([1480.0, 960.0])
+            .with_min_inner_size([1120.0, 760.0])
             .with_title("JumpShot Trainer"),
         ..Default::default()
     };
@@ -29,1053 +31,957 @@ fn main() -> eframe::Result<()> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum AppScreen {
-    Calibration,
-    Dashboard,
+enum ClipView {
+    Side,
+    Angle45,
+}
+
+impl ClipView {
+    fn as_cli(self) -> &'static str {
+        match self {
+            Self::Side => "side",
+            Self::Angle45 => "angle45",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Side => "Side View",
+            Self::Angle45 => "Front Quarter",
+        }
+    }
+
 }
 
 #[derive(Clone)]
-struct SessionBucket {
-    summary: ProcessedSessionSummary,
-    shot_indices: Vec<usize>,
+struct LoadedCorpus {
+    supervised_model: SupervisedModelSummary,
+    dataset_summary: TrainingDatasetSummary,
+}
+
+#[derive(Clone)]
+struct AnalysisRunResult {
+    clip_path: PathBuf,
+    manifest_path: PathBuf,
+    session_json: PathBuf,
+    shot_records: Vec<JanitorShotRecord>,
+    corpus: LoadedCorpus,
+    selected_view: ClipView,
+}
+
+enum WorkerEvent {
+    Status(String),
+    Completed(AnalysisRunResult),
+    Failed(String),
 }
 
 struct JumpshotTrainerApp {
-    calibration_input: CalibrationInput,
-    input: ShotInput,
-    session_audit: SessionAudit,
-    shots: Vec<SessionShotSummary>,
-    screen: AppScreen,
-    dataset_status: String,
-    dataset_summary: TrainingDatasetSummary,
-    model_readiness: ModelReadiness,
-    processed_sessions: Vec<ProcessedSessionSummary>,
-    records: Vec<JanitorShotRecord>,
-    session_buckets: Vec<SessionBucket>,
-    selected_session: usize,
-    selected_shot: usize,
-    supervised_model: SupervisedModelSummary,
+    project_root: PathBuf,
+    selected_clip_path: String,
+    selected_view: ClipView,
+    athlete_profile_path: String,
+    analysis_receiver: Option<Receiver<WorkerEvent>>,
+    is_processing: bool,
+    status_message: String,
+    error_message: Option<String>,
+    loaded_corpus: LoadedCorpus,
+    analysis_result: Option<AnalysisRunResult>,
+    selected_shot_index: usize,
+    show_engine_details: bool,
 }
 
 impl JumpshotTrainerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
 
-        let default_input = ShotInput {
-            elbow_flexion: 87.0,
-            knee_load: 108.0,
-            forearm_verticality: 89.0,
-            elbow_flare: 4.0,
-            release_height_ratio: 1.29,
-            release_timing_ms: 332.0,
-            release_at_apex_offset_ms: 16.0,
-            jump_height: 0.39,
-        };
-
-        let empty_summary = TrainingDatasetSummary {
-            example_count: 0,
-            paired_view_examples: 0,
-            label_balance: vec![],
-            average_target_score: 0.0,
-            feature_count: 0,
-        };
-
-        let corpus_path = std::path::Path::new("../datasets/shared/processed/training_corpus.parquet");
-        let parquet_path = std::path::Path::new("../datasets/shared/processed/calibration_20_shot_shot_records.parquet");
-        let preferred_path = if corpus_path.exists() { corpus_path } else { parquet_path };
-        let (input, calibration_input, dataset_status, dataset_summary, model_readiness, processed_sessions, records, supervised_model) =
-            if preferred_path.exists() {
-            match load_janitor_shot_records(preferred_path) {
-                Ok(records) if !records.is_empty() => {
-                    let examples = build_training_examples(&records);
-                    let summary = summarize_training_dataset(&examples);
-                    let readiness = evaluate_model_readiness(&summary);
-                    let processed_sessions = summarize_processed_sessions(&records);
-                    let supervised_model = train_supervised_score_model(&examples);
-                    let first = &records[0];
-                    (
-                        shot_input_from_record(first),
-                        calibration_input_from_record(first),
-                        format!("Linked to janitor export at {}", preferred_path.display()),
-                        summary,
-                        readiness,
-                        processed_sessions,
-                        records,
-                        supervised_model,
-                    )
-                }
-                Ok(_) => (
-                    default_input,
-                    default_calibration_input(),
-                    "Janitor parquet found but empty. Using local demo state.".to_string(),
-                    empty_summary.clone(),
-                    evaluate_model_readiness(&empty_summary),
-                    vec![],
-                    vec![],
-                    train_supervised_score_model(&[]),
-                ),
-                Err(error) => (
-                    default_input,
-                    default_calibration_input(),
-                    format!("Failed to load janitor parquet: {error}"),
-                    empty_summary.clone(),
-                    evaluate_model_readiness(&empty_summary),
-                    vec![],
-                    vec![],
-                    train_supervised_score_model(&[]),
-                ),
-            }
-        } else {
-            (
-                default_input,
-                default_calibration_input(),
-                format!("No janitor parquet yet at {}. Using local demo state.", preferred_path.display()),
-                empty_summary.clone(),
-                evaluate_model_readiness(&empty_summary),
-                vec![],
-                vec![],
-                train_supervised_score_model(&[]),
-            )
-        };
-
-        let session_buckets = build_session_buckets(&records, &processed_sessions);
-
-        let (shots, session_audit) = build_training_session(&input, &calibration_input, 8);
+        let athlete_rust_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = athlete_rust_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| athlete_rust_dir.clone());
+        let athlete_profile_path = project_root
+            .join("datasets/calibration_20_shot/annotations/athlete_profile.json")
+            .display()
+            .to_string();
 
         Self {
-            calibration_input,
-            input,
-            session_audit,
-            shots,
-            screen: AppScreen::Calibration,
-            dataset_status,
-            dataset_summary,
-            model_readiness,
-            processed_sessions,
-            records,
-            session_buckets,
-            selected_session: 0,
-            selected_shot: 0,
-            supervised_model,
+            project_root: project_root.clone(),
+            selected_clip_path: String::new(),
+            selected_view: ClipView::Side,
+            athlete_profile_path,
+            analysis_receiver: None,
+            is_processing: false,
+            status_message: "Drop a shooting clip into the window or paste a path to start.".to_string(),
+            error_message: None,
+            loaded_corpus: load_corpus_state(&project_root),
+            analysis_result: None,
+            selected_shot_index: 0,
+            show_engine_details: false,
         }
     }
 
-    fn regenerate_session(&mut self) {
-        let (shots, audit) = build_training_session(&self.input, &self.calibration_input, 8);
-        self.shots = shots;
-        self.session_audit = audit;
+    fn poll_background_worker(&mut self) {
+        let mut should_clear = false;
+        if let Some(receiver) = &self.analysis_receiver {
+            while let Ok(event) = receiver.try_recv() {
+                match event {
+                    WorkerEvent::Status(message) => {
+                        self.status_message = message;
+                    }
+                    WorkerEvent::Completed(result) => {
+                        self.loaded_corpus = result.corpus.clone();
+                        self.analysis_result = Some(result);
+                        self.selected_shot_index = 0;
+                        self.is_processing = false;
+                        self.error_message = None;
+                        self.status_message = "Analysis complete. Review the shot and make the adjustment cues below.".to_string();
+                        should_clear = true;
+                    }
+                    WorkerEvent::Failed(message) => {
+                        self.is_processing = false;
+                        self.error_message = Some(message.clone());
+                        self.status_message = "Analysis failed. Check the message below and try a cleaner clip or a different view."
+                            .to_string();
+                        should_clear = true;
+                    }
+                }
+            }
+        }
+        if should_clear {
+            self.analysis_receiver = None;
+        }
     }
 
-    fn load_selected_processed_shot(&mut self) {
-        let Some(bucket) = self.session_buckets.get(self.selected_session) else {
+    fn start_analysis(&mut self) {
+        let clip_path = PathBuf::from(self.selected_clip_path.trim());
+        if self.selected_clip_path.trim().is_empty() {
+            self.error_message = Some("Choose a video first. Drag one into the app or paste the full file path.".to_string());
             return;
-        };
-        let Some(record_index) = bucket.shot_indices.get(self.selected_shot) else {
+        }
+        if !clip_path.exists() {
+            self.error_message = Some("That video path does not exist. Check the file path and try again.".to_string());
             return;
-        };
-        let Some(record) = self.records.get(*record_index) else {
-            return;
-        };
-        self.input = shot_input_from_record(record);
-        self.calibration_input = calibration_input_from_record(record);
-        self.regenerate_session();
+        }
+
+        self.error_message = None;
+        self.is_processing = true;
+        self.status_message = "Starting analysis pipeline...".to_string();
+        self.analysis_result = None;
+        self.selected_shot_index = 0;
+
+        let project_root = self.project_root.clone();
+        let athlete_profile = PathBuf::from(self.athlete_profile_path.trim());
+        let selected_view = self.selected_view;
+        let (sender, receiver) = mpsc::channel();
+
+        thread::spawn(move || {
+            let outcome = run_analysis_pipeline(
+                &project_root,
+                &clip_path,
+                selected_view,
+                &athlete_profile,
+                &sender,
+            );
+            if let Err(error) = outcome {
+                let _ = sender.send(WorkerEvent::Failed(error));
+            }
+        });
+
+        self.analysis_receiver = Some(receiver);
+    }
+
+    fn selected_record(&self) -> Option<&JanitorShotRecord> {
+        let result = self.analysis_result.as_ref()?;
+        result.shot_records.get(self.selected_shot_index)
+    }
+
+    fn selected_shot_view(&self) -> Option<(ShotInput, CalibrationInput, TrainerSnapshot, Option<f32>)> {
+        let record = self.selected_record()?;
+        let input = shot_input_from_record(record);
+        let calibration = calibration_input_from_record(record);
+        let snapshot = analyze_shot(&input, &calibration);
+        let supervised = predict_supervised_score(
+            &self.loaded_corpus.supervised_model,
+            &feature_vector_from_shot_input(
+                &input,
+                calibration.body_height_m,
+                calibration.body_height_m * calibration.arm_span_ratio,
+                calibration.body_height_m * calibration.fingertip_reach_ratio,
+                record.distance_ft.unwrap_or(15.0),
+                record.paired_view_available,
+            ),
+        );
+        Some((input, calibration, snapshot, supervised))
     }
 }
 
 impl eframe::App for JumpshotTrainerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        apply_dropped_file(ctx, &mut self.selected_clip_path);
+        self.poll_background_worker();
         paint_background(ctx);
-        let snapshot = analyze_shot(&self.input, &self.calibration_input);
-        let supervised_score = predict_supervised_score(
-            &self.supervised_model,
-            &feature_vector_from_shot_input(
-                &self.input,
-                self.calibration_input.body_height_m,
-                self.calibration_input.body_height_m * self.calibration_input.arm_span_ratio,
-                self.calibration_input.body_height_m * self.calibration_input.fingertip_reach_ratio,
-                15.0,
-                false,
-            ),
-        );
 
-        egui::TopBottomPanel::top("header")
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(13, 18, 22))
-                    .inner_margin(egui::Margin::symmetric(22, 18)),
-            )
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(26, 22)))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("JumpShot Trainer").size(34.0).strong());
-                        ui.label(
-                            RichText::new("Rust biomechanics lab for calibration, diagnostics, and trainable shot data")
-                                .size(15.0)
-                                .color(Color32::from_rgb(177, 190, 196)),
-                        );
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    hero_header(ui);
+                    ui.add_space(18.0);
+
+                    shell_card(ui, |ui| {
+                        upload_panel(ui, self);
                     });
-                    ui.add_space(ui.available_width() - 320.0);
-                    pill_label(
-                        ui,
-                        if self.model_readiness.is_ready {
-                            "Training Ready"
-                        } else {
-                            "Collecting Dataset"
-                        },
-                        readiness_color(self.model_readiness.score),
-                    );
-                });
-                ui.add_space(10.0);
-                ui.horizontal_wrapped(|ui| {
-                    nav_button(ui, &mut self.screen, AppScreen::Calibration, "Calibration");
-                    nav_button(ui, &mut self.screen, AppScreen::Dashboard, "Performance Dashboard");
-                    status_chip(ui, &self.dataset_status);
+
+                    if self.is_processing {
+                        ui.add_space(14.0);
+                        shell_card(ui, |ui| {
+                            processing_panel(ui, &self.status_message);
+                        });
+                    }
+
+                    if let Some(error) = &self.error_message {
+                        ui.add_space(14.0);
+                        error_card(ui, error);
+                    }
+
+                    let analysis_result = self.analysis_result.clone();
+                    if let Some(result) = analysis_result.as_ref() {
+                        ui.add_space(18.0);
+                        if let Some((input, calibration, snapshot, supervised_score)) = self.selected_shot_view() {
+                            shell_card(ui, |ui| {
+                                analysis_overview(
+                                    ui,
+                                    result,
+                                    self.selected_shot_index,
+                                    &snapshot,
+                                    supervised_score,
+                                );
+                            });
+
+                            ui.add_space(14.0);
+                            ui.columns(2, |columns| {
+                                let (left_cols, right_cols) = columns.split_at_mut(1);
+                                let left = &mut left_cols[0];
+                                let right = &mut right_cols[0];
+
+                                shell_card(left, |ui| {
+                                    shot_selector(ui, self, result);
+                                });
+
+                                shell_card(right, |ui| {
+                                    adjustments_panel(ui, &snapshot);
+                                });
+                            });
+
+                            ui.add_space(14.0);
+                            ui.columns(2, |columns| {
+                                let (left_cols, right_cols) = columns.split_at_mut(1);
+                                let left = &mut left_cols[0];
+                                let right = &mut right_cols[0];
+
+                                shell_card(left, |ui| {
+                                    metric_summary(ui, &input, supervised_score, &snapshot);
+                                });
+                                shell_card(right, |ui| {
+                                    stage_panel(ui, &snapshot.stage_feedback);
+                                });
+                            });
+
+                            ui.add_space(14.0);
+                            shell_card(ui, |ui| {
+                                overlay_panel(ui, &input, &snapshot.stage_feedback, &calibration);
+                            });
+                        }
+                    }
+
+                    ui.add_space(16.0);
+                    engine_footer(ui, self);
                 });
             });
+    }
+}
 
-        match self.screen {
-            AppScreen::Calibration => self.render_calibration(ctx, &snapshot),
-            AppScreen::Dashboard => self.render_dashboard(ctx, &snapshot, supervised_score),
+fn run_analysis_pipeline(
+    project_root: &Path,
+    clip_path: &Path,
+    selected_view: ClipView,
+    athlete_profile: &Path,
+    sender: &mpsc::Sender<WorkerEvent>,
+) -> Result<(), String> {
+    let janitor = project_root.join("janitor_python/.venv/bin/jumpshot-janitor");
+    if !janitor.exists() {
+        return Err(format!("Janitor CLI not found at {}", janitor.display()));
+    }
+    if !athlete_profile.exists() {
+        return Err(format!("Athlete profile not found at {}", athlete_profile.display()));
+    }
+
+    let _ = sender.send(WorkerEvent::Status("Copying clip into the workspace...".to_string()));
+    let intake_output = run_command(
+        Command::new(&janitor)
+            .current_dir(project_root)
+            .arg("intake-video")
+            .arg("--project-root")
+            .arg(project_root)
+            .arg("--clip")
+            .arg(clip_path)
+            .arg("--view")
+            .arg(selected_view.as_cli()),
+    )?;
+    let manifest_path = parse_labeled_path(&intake_output, "Wrote intake manifest: ")
+        .ok_or_else(|| format!("Could not find manifest path in janitor output:\n{intake_output}"))?;
+
+    let _ = sender.send(WorkerEvent::Status("Running pose, ball, and shot analysis...".to_string()));
+    let strong_output = run_command(
+        Command::new(&janitor)
+            .current_dir(project_root)
+            .arg("strong-process")
+            .arg("--project-root")
+            .arg(project_root)
+            .arg("--manifest")
+            .arg(&manifest_path)
+            .arg("--athlete-profile")
+            .arg(athlete_profile)
+            .arg("--source-dataset")
+            .arg("uploaded_session")
+            .arg("--teacher-model")
+            .arg("mediapipe_yolov8_teacher")
+            .arg("--frame-stride")
+            .arg("30")
+            .arg("--yolo-weights")
+            .arg(project_root.join("yolov8n.pt"))
+            .arg("--pose-weights")
+            .arg(project_root.join("yolov8n-pose.pt"))
+            .arg("--mediapipe-model")
+            .arg(project_root.join("datasets/models/mediapipe/pose_landmarker_lite.task")),
+    )?;
+
+    let shots_parquet = parse_labeled_path(&strong_output, "Wrote shots_parquet: ")
+        .ok_or_else(|| format!("Could not find shot parquet path in janitor output:\n{strong_output}"))?;
+    let session_json = parse_labeled_path(&strong_output, "Wrote session_json: ")
+        .ok_or_else(|| format!("Could not find session json path in janitor output:\n{strong_output}"))?;
+
+    let _ = sender.send(WorkerEvent::Status("Refreshing the shared model corpus...".to_string()));
+    let _ = run_command(
+        Command::new(&janitor)
+            .current_dir(project_root)
+            .arg("build-corpus")
+            .arg("--project-root")
+            .arg(project_root),
+    )?;
+
+    let shot_records = load_janitor_shot_records(&shots_parquet)
+        .map_err(|error| format!("Failed to load processed shots: {error}"))?;
+    if shot_records.is_empty() {
+        return Err("The clip finished processing, but no usable shots were detected. Try a clearer angle, tighter framing, or a steadier clip.".to_string());
+    }
+
+    let corpus = load_corpus_state(project_root);
+    let result = AnalysisRunResult {
+        clip_path: clip_path.to_path_buf(),
+        manifest_path,
+        session_json,
+        shot_records,
+        corpus,
+        selected_view,
+    };
+    let _ = sender.send(WorkerEvent::Completed(result));
+    Ok(())
+}
+
+fn load_corpus_state(project_root: &Path) -> LoadedCorpus {
+    let empty_summary = TrainingDatasetSummary {
+        example_count: 0,
+        paired_view_examples: 0,
+        label_balance: vec![],
+        average_target_score: 0.0,
+        feature_count: 0,
+    };
+    let corpus_path = project_root.join("datasets/shared/processed/training_corpus.parquet");
+    let records = load_janitor_shot_records(&corpus_path).unwrap_or_default();
+    if records.is_empty() {
+        return LoadedCorpus {
+            supervised_model: train_supervised_score_model(&[]),
+            dataset_summary: empty_summary,
+        };
+    }
+
+    let examples = build_training_examples(&records);
+    LoadedCorpus {
+        supervised_model: train_supervised_score_model(&examples),
+        dataset_summary: summarize_training_dataset(&examples),
+    }
+}
+
+fn run_command(command: &mut Command) -> Result<String, String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("Failed to start command: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn parse_labeled_path(output: &str, prefix: &str) -> Option<PathBuf> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix).map(|rest| PathBuf::from(rest.trim())))
+}
+
+fn apply_dropped_file(ctx: &egui::Context, selected_clip_path: &mut String) {
+    let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+    if let Some(file) = dropped.into_iter().find(|file| file.path.is_some()) {
+        if let Some(path) = file.path {
+            *selected_clip_path = path.display().to_string();
         }
     }
 }
 
-impl JumpshotTrainerApp {
-    fn render_calibration(&mut self, ctx: &egui::Context, snapshot: &biomech_ai::trainer::TrainerSnapshot) {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 22)))
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    hero_metrics(ui, &self.dataset_summary, &self.model_readiness, snapshot.inference.score);
-                    ui.add_space(16.0);
+fn hero_header(ui: &mut egui::Ui) {
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new("JumpShot Trainer").size(42.0).strong().color(Color32::from_rgb(245, 239, 228)));
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Drop in a clip, let the model break down your form, and get the next adjustment to make.")
+                .size(17.0)
+                .color(Color32::from_rgb(196, 204, 208)),
+        );
+    });
+}
 
-                    ui.columns(2, |columns| {
-                        let (left_cols, right_cols) = columns.split_at_mut(1);
-                        let left = &mut left_cols[0];
-                        let right = &mut right_cols[0];
+fn upload_panel(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp) {
+    ui.label(RichText::new("Analyze A Jump Shot").size(24.0).strong());
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("Use a side view or front-quarter clip. The app will process the video in the background and return coaching feedback.")
+            .color(Color32::from_rgb(176, 185, 191)),
+    );
+    ui.add_space(16.0);
 
-                        section_card(left, "Calibration Deck", "Dial in athlete geometry and camera placement before the first session.", |ui| {
-                            slider(ui, &mut self.calibration_input.body_height_m, 1.45..=2.25, "Body Height");
-                            slider(ui, &mut self.calibration_input.shoulder_width_m, 0.32..=0.62, "Shoulder Width");
-                            slider(ui, &mut self.calibration_input.arm_span_ratio, 0.92..=1.12, "Arm Span Ratio");
-                            slider(ui, &mut self.calibration_input.fingertip_reach_ratio, 1.2..=1.46, "Standing Reach Ratio");
-                            slider(ui, &mut self.calibration_input.camera_distance_m, 2.0..=8.0, "Camera Distance");
-                            slider(ui, &mut self.calibration_input.lens_tilt_deg, -10.0..=15.0, "Lens Tilt");
-                            ui.add_space(10.0);
-                            if accent_button(ui, "Lock Calibration + Open Dashboard").clicked() {
-                                self.regenerate_session();
-                                self.screen = AppScreen::Dashboard;
-                            }
-                        });
+    egui::Frame::new()
+        .fill(Color32::from_rgb(19, 26, 31))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(53, 72, 80)))
+        .corner_radius(18.0)
+        .inner_margin(egui::Margin::symmetric(18, 16))
+        .show(ui, |ui| {
+            ui.label(RichText::new("Drop a video here or paste a path below").size(18.0).strong());
+            ui.add_space(10.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut app.selected_clip_path)
+                    .hint_text("/absolute/path/to/video.mp4")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.add_space(12.0);
 
-                        section_card(right, "Athlete Geometry", "Estimated values that will be reused by the feature and training pipeline.", |ui| {
-                            metric_pair(ui, "Estimated Wingspan", &format!("{:.2} m", snapshot.calibration.estimated_wingspan_m));
-                            metric_pair(ui, "Standing Reach", &format!("{:.2} m", snapshot.calibration.estimated_standing_reach_m));
-                            metric_pair(ui, "Camera Angle", &format!("{:.1} deg", snapshot.calibration.estimated_camera_angle_deg));
-                            metric_pair(ui, "Calibration Confidence", &format!("{:.0}%", snapshot.calibration.confidence * 100.0));
-                            ui.add_space(12.0);
-                            draw_calibration_preview(ui, &self.calibration_input);
-                        });
-                    });
-
-                    ui.add_space(16.0);
-                    ui.columns(2, |columns| {
-                        let (left_cols, right_cols) = columns.split_at_mut(1);
-                        let left = &mut left_cols[0];
-                        let right = &mut right_cols[0];
-
-                        section_card(left, "Training Readiness", "This checks whether the current dataset is strong enough for the first Rust-side training pass.", |ui| {
-                            readiness_panel(ui, &self.model_readiness);
-                        });
-
-                        section_card(right, "Dataset Summary", "Shared Parquet exported by the Python janitor and read directly by the Rust athlete app.", |ui| {
-                            metric_pair(ui, "Examples", &self.dataset_summary.example_count.to_string());
-                            metric_pair(ui, "Paired Views", &self.dataset_summary.paired_view_examples.to_string());
-                            metric_pair(ui, "Feature Count", &self.dataset_summary.feature_count.to_string());
-                            metric_pair(ui, "Avg Target Score", &format!("{:.0}%", self.dataset_summary.average_target_score * 100.0));
-                            ui.add_space(10.0);
-                            for (label, count) in &self.dataset_summary.label_balance {
-                                label_row(ui, *label, *count);
-                            }
-                        });
-                    });
-                });
+            ui.horizontal(|ui| {
+                toggle_chip(ui, &mut app.selected_view, ClipView::Side);
+                toggle_chip(ui, &mut app.selected_view, ClipView::Angle45);
             });
-    }
 
-    fn render_dashboard(&mut self, ctx: &egui::Context, snapshot: &biomech_ai::trainer::TrainerSnapshot, supervised_score: Option<f32>) {
-        egui::SidePanel::left("control_panel")
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(18, 24, 29))
-                    .inner_margin(egui::Margin::symmetric(18, 18)),
-            )
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.label(RichText::new("Shot Controls").size(24.0).strong());
-                ui.label(RichText::new("Tune mechanics and inspect the live training signal.").size(14.0));
-                ui.add_space(10.0);
-                control_slider(ui, &mut self.input.elbow_flexion, 60.0..=120.0, "Elbow Flexion", "Compact pocket");
-                control_slider(ui, &mut self.input.knee_load, 85.0..=135.0, "Knee Load", "Efficient dip");
-                control_slider(ui, &mut self.input.forearm_verticality, 65.0..=100.0, "Forearm Verticality", "Stacked line");
-                control_slider(ui, &mut self.input.elbow_flare, 0.0..=20.0, "Elbow Flare", "Alignment drift");
-                control_slider(ui, &mut self.input.release_height_ratio, 0.95..=1.5, "Release Height Ratio", "High finish");
-                control_slider(ui, &mut self.input.release_timing_ms, 220.0..=500.0, "Release Timing (ms)", "Lift to snap");
-                control_slider(ui, &mut self.input.release_at_apex_offset_ms, -40.0..=120.0, "Release vs Apex (ms)", "Apex sync");
-                control_slider(ui, &mut self.input.jump_height, 0.15..=0.6, "Jump Height (m)", "Vertical pop");
+            ui.add_space(12.0);
+            ui.collapsing("Advanced", |ui| {
+                ui.label(RichText::new("Athlete profile path").color(Color32::from_rgb(176, 185, 191)));
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.athlete_profile_path)
+                        .desired_width(f32::INFINITY),
+                );
+            });
 
-                ui.add_space(12.0);
-                if accent_button(ui, "Rebuild Session Audit").clicked() {
-                    self.regenerate_session();
-                }
+            ui.add_space(14.0);
+            let button_text = if app.is_processing { "Analyzing..." } else { "Analyze Video" };
+            if primary_button(ui, button_text).clicked() && !app.is_processing {
+                app.start_analysis();
+            }
+        });
+}
 
-                ui.add_space(14.0);
-                section_mini(ui, "Calibration Carryover");
-                metric_pair(ui, "Reach", &format!("{:.2} m", snapshot.calibration.estimated_standing_reach_m));
-                metric_pair(ui, "Wingspan", &format!("{:.2} m", snapshot.calibration.estimated_wingspan_m));
-                metric_pair(ui, "Camera Angle", &format!("{:.1} deg", snapshot.calibration.estimated_camera_angle_deg));
-                ui.add_space(12.0);
-                section_mini(ui, "Supervised Rust Model");
-                if self.supervised_model.trained {
-                    metric_pair(ui, "Examples", &self.supervised_model.example_count.to_string());
-                    metric_pair(ui, "Train MAE", &format!("{:.3}", self.supervised_model.training_mae));
-                    metric_pair(ui, "Val MAE", &format!("{:.3}", self.supervised_model.validation_mae));
-                    if let Some(score) = supervised_score {
-                        metric_pair(ui, "Live Pred Score", &format!("{:.0} / 100", score * 100.0));
-                    }
+fn processing_panel(ui: &mut egui::Ui, status_message: &str) {
+    ui.horizontal(|ui| {
+        ui.add(egui::Spinner::new().size(22.0));
+        ui.add_space(10.0);
+        ui.vertical(|ui| {
+            ui.label(RichText::new("Running analysis").size(20.0).strong());
+            ui.label(RichText::new(status_message).color(Color32::from_rgb(176, 185, 191)));
+        });
+    });
+}
+
+fn error_card(ui: &mut egui::Ui, message: &str) {
+    shell_card(ui, |ui| {
+        ui.label(RichText::new("Analysis Error").size(20.0).strong().color(Color32::from_rgb(255, 214, 214)));
+        ui.add_space(6.0);
+        ui.label(RichText::new(message).color(Color32::from_rgb(255, 188, 188)));
+    });
+}
+
+fn analysis_overview(
+    ui: &mut egui::Ui,
+    result: &AnalysisRunResult,
+    selected_shot_index: usize,
+    snapshot: &TrainerSnapshot,
+    supervised_score: Option<f32>,
+) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new("Shot Analysis").size(26.0).strong());
+            ui.label(
+                RichText::new(format!(
+                    "{} • {} detected shots • {}",
+                    display_file_name(&result.clip_path),
+                    result.shot_records.len(),
+                    result.selected_view.label()
+                ))
+                .color(Color32::from_rgb(176, 185, 191)),
+            );
+        });
+        ui.add_space(ui.available_width() - 260.0);
+        score_pill(
+            ui,
+            &format!("{} / 100", snapshot.inference.score),
+            score_color(snapshot.inference.score),
+        );
+    });
+
+    ui.add_space(14.0);
+    ui.columns(3, |columns| {
+        let score_text = supervised_score
+            .map(|score| format!("{:.0} / 100", score * 100.0))
+            .unwrap_or_else(|| "Not ready".to_string());
+        stat_card(&mut columns[0], "Model Score", &score_text, "Overall confidence from the current Rust scoring model.");
+        stat_card(
+            &mut columns[1],
+            "Shot Label",
+            &format!("{:?}", snapshot.inference.label),
+            "Best-fit style bucket based on your extracted mechanics.",
+        );
+        stat_card(
+            &mut columns[2],
+            "Selected Shot",
+            &format!("{} / {}", selected_shot_index + 1, result.shot_records.len()),
+            "If the clip contains multiple reps, you can switch between them below.",
+        );
+    });
+}
+
+fn shot_selector(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp, result: &AnalysisRunResult) {
+    ui.label(RichText::new("Pick The Rep To Review").size(20.0).strong());
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new("Each detected shot can be selected below. The coaching cards update instantly.")
+            .color(Color32::from_rgb(176, 185, 191)),
+    );
+    ui.add_space(12.0);
+
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            for (index, record) in result.shot_records.iter().enumerate() {
+                let selected = app.selected_shot_index == index;
+                let label = format!("Shot {} • {:.0} ms", index + 1, record.release_timing_ms.unwrap_or(0.0));
+                let fill = if selected {
+                    Color32::from_rgb(215, 119, 64)
                 } else {
-                    ui.label("Not enough corpus examples yet for supervised fitting.");
+                    Color32::from_rgb(25, 33, 39)
+                };
+                if ui
+                    .add(
+                        egui::Button::new(label)
+                            .fill(fill)
+                            .corner_radius(12.0)
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(72, 90, 98))),
+                    )
+                    .clicked()
+                {
+                    app.selected_shot_index = index;
                 }
-            });
+            }
+        });
+    });
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 18)))
-            .show(ctx, |ui| {
-                hero_metrics(ui, &self.dataset_summary, &self.model_readiness, snapshot.inference.score);
-                ui.add_space(16.0);
+    ui.add_space(12.0);
+    ui.label(
+        RichText::new(format!(
+            "Manifest: {}",
+            display_file_name(&result.manifest_path)
+        ))
+        .color(Color32::from_rgb(124, 142, 150)),
+    );
+}
 
-                ui.columns(2, |columns| {
-                    let (left_cols, right_cols) = columns.split_at_mut(1);
-                    let left = &mut left_cols[0];
-                    let right = &mut right_cols[0];
-
-                    section_card(left, "Shot Intelligence", "Live ML readout, nearest motion prototype, and coaching prompts.", |ui| {
-                        score_badge(ui, snapshot.inference.score, snapshot.inference.label);
-                        ui.add_space(10.0);
-                        ui.label(format!("Nearest learned pattern: {}", snapshot.inference.nearest_neighbor));
-                        ui.label(format!("Model confidence: {:.0}%", snapshot.inference.confidence * 100.0));
-                        ui.add_space(10.0);
-                        for item in &snapshot.inference.feedback {
-                            ui.label(format!("• {item}"));
-                        }
-                    });
-
-                    section_card(right, "Training Readiness", "Model-facing summary of what the current Parquet dataset can support.", |ui| {
-                        readiness_panel(ui, &self.model_readiness);
-                    });
-                });
-
-                ui.add_space(16.0);
-
-                section_card(ui, "Processed Sessions", "Uploaded sessions currently in the Rust review corpus, including paired-view coverage and teacher provenance.", |ui| {
-                    processed_sessions_panel(ui, &self.processed_sessions);
-                });
-
-                ui.add_space(16.0);
-
-                section_card(ui, "Session Browser", "Select a processed session and drill into specific extracted shots from the corpus.", |ui| {
-                    processed_shot_browser(ui, self, supervised_score);
-                });
-
-                ui.add_space(16.0);
-
-                ui.columns(2, |columns| {
-                    let (left_cols, right_cols) = columns.split_at_mut(1);
-                    let left = &mut left_cols[0];
-                    let right = &mut right_cols[0];
-
-                    section_card(left, "Mechanical Diagnostics", "Color-coded score bars against the elite baseline window.", |ui| {
-                        for diagnostic in &snapshot.diagnostics {
-                            diagnostic_row(ui, diagnostic.metric.as_str(), diagnostic.actual, diagnostic.ideal, diagnostic.severity);
-                        }
-                    });
-
-                    section_card(right, "Shot Audit", "Session consistency across generated attempts and top recurring corrections.", |ui| {
-                        let top_fixes = if self.session_audit.top_issues.is_empty() {
-                            "None".to_string()
-                        } else {
-                            self.session_audit.top_issues.join(", ")
-                        };
-                        metric_pair(ui, "Attempts", &self.session_audit.attempt_count.to_string());
-                        metric_pair(ui, "Average Consistency", &format!("{}", self.session_audit.average_consistency_score));
-                        metric_pair(ui, "Top Fixes", &top_fixes);
-                        ui.add_space(10.0);
-                        mini_timeline(ui, &self.shots);
-                    });
-                });
-
-                ui.add_space(16.0);
-
-                ui.columns(2, |columns| {
-                    let (left_cols, right_cols) = columns.split_at_mut(1);
-                    let left = &mut left_cols[0];
-                    let right = &mut right_cols[0];
-
-                    section_card(left, "Kinetic Chain Stages", "Stage-by-stage cues for the load, set point, release, and finish.", |ui| {
-                        stage_cards(ui, &snapshot.stage_feedback);
-                    });
-
-                    section_card(right, "Visual Review", "Overlay and release-path panels designed to mirror the eventual camera review experience.", |ui| {
-                        draw_overlay_review(ui, &self.input, &snapshot.stage_feedback);
-                        ui.add_space(10.0);
-                        draw_release_panel(ui, &self.input);
-                    });
-                });
-            });
+fn adjustments_panel(ui: &mut egui::Ui, snapshot: &TrainerSnapshot) {
+    ui.label(RichText::new("What To Adjust").size(20.0).strong());
+    ui.add_space(8.0);
+    for (title, body) in coaching_actions(snapshot).into_iter().take(3) {
+        advice_card(ui, &title, &body);
+        ui.add_space(8.0);
     }
 }
 
+fn metric_summary(
+    ui: &mut egui::Ui,
+    input: &ShotInput,
+    supervised_score: Option<f32>,
+    snapshot: &TrainerSnapshot,
+) {
+    ui.label(RichText::new("Mechanical Snapshot").size(20.0).strong());
+    ui.add_space(10.0);
+
+    let score_text = supervised_score
+        .map(|score| format!("{:.0} / 100", score * 100.0))
+        .unwrap_or_else(|| format!("{} / 100", snapshot.inference.score));
+
+    ui.columns(2, |columns| {
+        stat_card_compact(&mut columns[0], "Overall", &score_text);
+        stat_card_compact(&mut columns[1], "Prototype", snapshot.inference.nearest_neighbor.as_str());
+        stat_card_compact(&mut columns[0], "Elbow Flare", &format!("{:.1}°", input.elbow_flare));
+        stat_card_compact(&mut columns[1], "Forearm", &format!("{:.1}°", input.forearm_verticality));
+        stat_card_compact(&mut columns[0], "Release Timing", &format!("{:.0} ms", input.release_timing_ms));
+        stat_card_compact(&mut columns[1], "Release Height", &format!("{:.2}x", input.release_height_ratio));
+        stat_card_compact(&mut columns[0], "Knee Load", &format!("{:.1}°", input.knee_load));
+        stat_card_compact(&mut columns[1], "Jump Height", &format!("{:.2} m", input.jump_height));
+    });
+
+    ui.add_space(10.0);
+    ui.label(RichText::new("Quick model cue").color(Color32::from_rgb(176, 185, 191)));
+    if let Some(feedback) = snapshot.inference.feedback.first() {
+        ui.label(RichText::new(feedback).size(15.0));
+    }
+}
+
+fn stage_panel(ui: &mut egui::Ui, stages: &[StageFeedback]) {
+    ui.label(RichText::new("Shot Phases").size(20.0).strong());
+    ui.add_space(10.0);
+    for stage in stages {
+        stage_row(ui, stage);
+        ui.add_space(8.0);
+    }
+}
+
+fn overlay_panel(
+    ui: &mut egui::Ui,
+    input: &ShotInput,
+    stage_feedback: &[StageFeedback],
+    calibration: &CalibrationInput,
+) {
+    ui.label(RichText::new("Visual Review").size(20.0).strong());
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!(
+            "Estimated athlete setup: {:.2} m height • {:.2} m reach • {:.1}° lens tilt",
+            calibration.body_height_m,
+            calibration.body_height_m * calibration.fingertip_reach_ratio,
+            calibration.lens_tilt_deg
+        ))
+        .color(Color32::from_rgb(176, 185, 191)),
+    );
+    ui.add_space(12.0);
+    draw_overlay_review(ui, input, stage_feedback);
+}
+
+fn engine_footer(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp) {
+    ui.add_space(8.0);
+    if ui
+        .button(if app.show_engine_details {
+            "Hide Engine Details"
+        } else {
+            "Show Engine Details"
+        })
+        .clicked()
+    {
+        app.show_engine_details = !app.show_engine_details;
+    }
+
+    if app.show_engine_details {
+        ui.add_space(10.0);
+        shell_card(ui, |ui| {
+            ui.label(RichText::new("Engine Status").size(18.0).strong());
+            ui.add_space(8.0);
+            ui.label(format!(
+                "{} training examples available in the shared corpus.",
+                app.loaded_corpus.dataset_summary.example_count
+            ));
+            ui.label(format!(
+                "{} paired-view examples currently support the background score model.",
+                app.loaded_corpus.dataset_summary.paired_view_examples
+            ));
+            if let Some(result) = &app.analysis_result {
+                ui.add_space(6.0);
+                ui.label(format!("Latest processed session: {}", result.session_json.display()));
+            }
+        });
+    }
+}
+
+fn coaching_actions(snapshot: &TrainerSnapshot) -> Vec<(String, String)> {
+    let mut issues = snapshot.diagnostics.clone();
+    issues.sort_by(|a, b| {
+        severity_rank(b.severity)
+            .cmp(&severity_rank(a.severity))
+            .then_with(|| b.delta.abs().partial_cmp(&a.delta.abs()).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut actions = Vec::new();
+    for issue in issues.into_iter().filter(|issue| issue.severity != DiagnosticSeverity::Optimal) {
+        let body = match issue.metric.as_str() {
+            "Elbow Flare" => "Keep the shooting elbow tucked closer to your shot line so the release stays compact.".to_string(),
+            "Forearm Verticality" => "Get the wrist stacked over the elbow earlier so the forearm stays more vertical at the set point.".to_string(),
+            "Release Timing" => "Let the ball go sooner so the release happens closer to the top of the jump.".to_string(),
+            "Release Height Ratio" => "Raise the finish and get into the shot pocket earlier so the release point climbs.".to_string(),
+            "Knee Load" => "Smooth out the dip so the lower body loads without extra wasted motion.".to_string(),
+            "Elbow Flexion" => "Keep the set point more compact so the elbow stays in a tighter window.".to_string(),
+            _ => issue.message.clone(),
+        };
+        actions.push((issue.metric.clone(), body));
+    }
+
+    if actions.is_empty() {
+        actions.push((
+            "Good Base".to_string(),
+            "The shot is sitting in a healthy window right now. Focus on repeating the same rhythm rep after rep.".to_string(),
+        ));
+    }
+
+    actions
+}
+
+fn severity_rank(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Major => 3,
+        DiagnosticSeverity::Minor => 2,
+        DiagnosticSeverity::Optimal => 1,
+    }
+}
+
+fn display_file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn apply_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.override_text_color = Some(Color32::from_rgb(240, 236, 226));
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(11, 16, 20);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(20, 28, 34);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(33, 45, 52);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(215, 119, 64);
+    visuals.widgets.inactive.fg_stroke.color = Color32::from_rgb(240, 236, 226);
+    visuals.selection.bg_fill = Color32::from_rgb(215, 119, 64);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(255, 230, 210));
+    ctx.set_visuals(visuals);
+
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(14.0, 10.0);
-    style.spacing.window_margin = egui::Margin::same(12);
-    style.visuals = egui::Visuals::dark();
-    style.visuals.override_text_color = Some(Color32::from_rgb(240, 236, 228));
-    style.visuals.panel_fill = Color32::from_rgb(12, 18, 22);
-    style.visuals.window_fill = Color32::from_rgb(12, 18, 22);
-    style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(19, 25, 30);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(28, 37, 43);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(44, 57, 64);
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(190, 113, 58);
-    style.visuals.selection.bg_fill = Color32::from_rgb(190, 113, 58);
-    style.visuals.hyperlink_color = Color32::from_rgb(238, 183, 92);
-    style.text_styles.insert(
-        egui::TextStyle::Heading,
-        FontId::new(30.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Body,
-        FontId::new(16.0, FontFamily::Proportional),
-    );
+    style.spacing.item_spacing = egui::vec2(12.0, 12.0);
+    style.spacing.button_padding = egui::vec2(16.0, 10.0);
+    style.visuals.window_corner_radius = 20.0.into();
+    style.visuals.panel_fill = Color32::from_rgb(10, 15, 18);
     ctx.set_style(style);
 }
 
 fn paint_background(ctx: &egui::Context) {
-    let rect = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::background());
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(10, 14, 18));
-    painter.circle_filled(rect.left_top() + egui::vec2(220.0, 180.0), 260.0, Color32::from_rgba_premultiplied(168, 88, 41, 22));
-    painter.circle_filled(rect.right_top() + egui::vec2(-180.0, 220.0), 220.0, Color32::from_rgba_premultiplied(51, 108, 89, 28));
-    painter.circle_filled(rect.center_bottom() + egui::vec2(-120.0, -60.0), 280.0, Color32::from_rgba_premultiplied(35, 57, 73, 24));
+    let rect = ctx.content_rect();
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(8, 12, 15));
+    painter.circle_filled(
+        rect.left_top() + egui::vec2(rect.width() * 0.18, rect.height() * 0.16),
+        rect.width() * 0.18,
+        Color32::from_rgba_unmultiplied(212, 110, 51, 34),
+    );
+    painter.circle_filled(
+        rect.right_bottom() - egui::vec2(rect.width() * 0.14, rect.height() * 0.18),
+        rect.width() * 0.22,
+        Color32::from_rgba_unmultiplied(45, 122, 120, 24),
+    );
 }
 
-fn hero_metrics(ui: &mut egui::Ui, summary: &TrainingDatasetSummary, readiness: &ModelReadiness, shot_score: u8) {
-    ui.horizontal(|ui| {
-        metric_tile(ui, "Dataset", &summary.example_count.to_string(), "examples");
-        metric_tile(ui, "Paired Views", &summary.paired_view_examples.to_string(), "linked shots");
-        metric_tile(ui, "Readiness", &readiness.score.to_string(), "training score");
-        metric_tile(ui, "Live Shot", &shot_score.to_string(), "current inference");
-    });
-}
-
-fn metric_tile(ui: &mut egui::Ui, title: &str, value: &str, subtitle: &str) {
+fn shell_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(Color32::from_rgb(19, 25, 30))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(46, 60, 68)))
-        .corner_radius(18.0)
-        .inner_margin(egui::Margin::symmetric(16, 16))
-        .show(ui, |ui| {
-            ui.set_min_size(Vec2::new((ui.available_width() / 4.0).max(150.0), 92.0));
-            ui.label(RichText::new(title).size(14.0).color(Color32::from_rgb(165, 178, 184)));
-            ui.label(RichText::new(value).size(30.0).strong());
-            ui.label(RichText::new(subtitle).size(13.0).color(Color32::from_rgb(122, 136, 145)));
-        });
-}
-
-fn section_card<R>(
-    ui: &mut egui::Ui,
-    title: &str,
-    subtitle: &str,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    egui::Frame::new()
-        .fill(Color32::from_rgb(18, 24, 29))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(43, 56, 63)))
+        .fill(Color32::from_rgb(13, 19, 24))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(42, 57, 65)))
         .corner_radius(22.0)
-        .inner_margin(egui::Margin::symmetric(18, 18))
-        .show(ui, |ui| {
-            ui.label(RichText::new(title).size(24.0).strong());
-            ui.label(RichText::new(subtitle).size(14.0).color(Color32::from_rgb(162, 176, 183)));
-            ui.add_space(12.0);
-            add_contents(ui)
-        })
-        .inner
+        .inner_margin(egui::Margin::symmetric(20, 18))
+        .show(ui, add_contents);
 }
 
-fn section_mini(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).size(18.0).strong());
-    ui.add_space(6.0);
-}
-
-fn metric_pair(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(Color32::from_rgb(164, 176, 182)).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value).size(16.0));
-        });
-    });
-}
-
-fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, label: &str) {
-    ui.add(egui::Slider::new(value, range).text(label));
-}
-
-fn control_slider(
-    ui: &mut egui::Ui,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    label: &str,
-    hint: &str,
-) {
-    ui.label(RichText::new(label).strong());
-    ui.add(egui::Slider::new(value, range).show_value(true));
-    ui.label(RichText::new(hint).size(12.0).color(Color32::from_rgb(140, 154, 161)));
-    ui.add_space(6.0);
-}
-
-fn nav_button(ui: &mut egui::Ui, current: &mut AppScreen, target: AppScreen, label: &str) {
-    let selected = *current == target;
-    let button = egui::Button::new(label)
-        .fill(if selected {
-            Color32::from_rgb(190, 113, 58)
-        } else {
-            Color32::from_rgb(27, 36, 42)
-        })
-        .corner_radius(999.0);
-    if ui.add(button).clicked() {
-        *current = target;
-    }
-}
-
-fn accent_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(RichText::new(label).strong())
-            .fill(Color32::from_rgb(190, 113, 58))
-            .corner_radius(14.0)
-            .min_size(Vec2::new(ui.available_width().min(320.0), 42.0)),
+        egui::Button::new(RichText::new(label).size(16.0).strong())
+            .fill(Color32::from_rgb(215, 119, 64))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(244, 201, 172)))
+            .corner_radius(14.0),
     )
 }
 
-fn pill_label(ui: &mut egui::Ui, label: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color)
-        .corner_radius(999.0)
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            ui.label(RichText::new(label).strong().size(13.0));
-        });
-}
-
-fn status_chip(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::new()
-        .fill(Color32::from_rgb(21, 28, 33))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(48, 61, 68)))
-        .corner_radius(999.0)
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).size(12.5).color(Color32::from_rgb(187, 198, 203)));
-        });
-}
-
-fn score_badge(ui: &mut egui::Ui, score: u8, label: ShotQualityLabel) {
-    let fill = match label {
-        ShotQualityLabel::Elite => Color32::from_rgb(61, 135, 88),
-        ShotQualityLabel::Strong => Color32::from_rgb(170, 121, 52),
-        ShotQualityLabel::Developing => Color32::from_rgb(176, 95, 58),
-        ShotQualityLabel::Raw => Color32::from_rgb(152, 61, 55),
+fn toggle_chip(ui: &mut egui::Ui, selected_view: &mut ClipView, option: ClipView) {
+    let selected = *selected_view == option;
+    let fill = if selected {
+        Color32::from_rgb(56, 132, 130)
+    } else {
+        Color32::from_rgb(25, 33, 39)
     };
+    if ui
+        .add(
+            egui::Button::new(option.label())
+                .fill(fill)
+                .corner_radius(999.0)
+                .stroke(Stroke::new(1.0, Color32::from_rgb(68, 88, 95))),
+        )
+        .clicked()
+    {
+        *selected_view = option;
+    }
+}
 
+fn stat_card(ui: &mut egui::Ui, title: &str, value: &str, caption: &str) {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(18, 25, 30))
+        .corner_radius(18.0)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_min_height(128.0);
+            ui.label(RichText::new(title).color(Color32::from_rgb(170, 180, 186)));
+            ui.add_space(8.0);
+            ui.label(RichText::new(value).size(24.0).strong());
+            ui.add_space(10.0);
+            ui.label(RichText::new(caption).size(13.0).color(Color32::from_rgb(143, 156, 163)));
+        });
+}
+
+fn stat_card_compact(ui: &mut egui::Ui, title: &str, value: &str) {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(18, 25, 30))
+        .corner_radius(14.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_min_height(74.0);
+            ui.label(RichText::new(title).size(12.0).color(Color32::from_rgb(170, 180, 186)));
+            ui.add_space(4.0);
+            ui.label(RichText::new(value).size(20.0).strong());
+        });
+}
+
+fn advice_card(ui: &mut egui::Ui, title: &str, body: &str) {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(19, 27, 31))
+        .corner_radius(16.0)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.label(RichText::new(title).size(16.0).strong());
+            ui.add_space(6.0);
+            ui.label(RichText::new(body).color(Color32::from_rgb(185, 193, 198)));
+        });
+}
+
+fn score_pill(ui: &mut egui::Ui, value: &str, fill: Color32) {
     egui::Frame::new()
         .fill(fill)
-        .corner_radius(18.0)
-        .inner_margin(egui::Margin::symmetric(18, 16))
+        .corner_radius(999.0)
+        .inner_margin(egui::Margin::symmetric(18, 10))
         .show(ui, |ui| {
-            ui.label(
-                RichText::new(format!("{}  •  {}", score, label_text(label)))
-                    .size(30.0)
-                    .strong(),
-            );
+            ui.label(RichText::new(value).strong().size(18.0).color(Color32::from_rgb(12, 15, 18)));
         });
 }
 
-fn label_text(label: ShotQualityLabel) -> &'static str {
-    match label {
-        ShotQualityLabel::Elite => "Elite Window",
-        ShotQualityLabel::Strong => "Strong Base",
-        ShotQualityLabel::Developing => "Developing",
-        ShotQualityLabel::Raw => "Needs Rebuild",
-    }
-}
-
-fn label_row(ui: &mut egui::Ui, label: ShotQualityLabel, count: usize) {
-    let color = match label {
-        ShotQualityLabel::Elite => Color32::from_rgb(79, 162, 109),
-        ShotQualityLabel::Strong => Color32::from_rgb(214, 161, 65),
-        ShotQualityLabel::Developing => Color32::from_rgb(201, 118, 70),
-        ShotQualityLabel::Raw => Color32::from_rgb(194, 77, 62),
-    };
-    ui.horizontal(|ui| {
-        ui.colored_label(color, label_text(label));
-        ui.label(format!("{count} examples"));
-    });
-}
-
-fn readiness_panel(ui: &mut egui::Ui, readiness: &ModelReadiness) {
-    let color = readiness_color(readiness.score);
-    ui.horizontal(|ui| {
-        pill_label(
-            ui,
-            if readiness.is_ready {
-                "Ready for first supervised run"
-            } else {
-                "Still collecting trainable coverage"
-            },
-            color,
-        );
-        ui.label(format!("{} / 100", readiness.score));
-    });
-    ui.add_space(8.0);
-    for item in &readiness.checklist {
-        ui.label(format!("• {item}"));
-    }
-    if !readiness.risks.is_empty() {
-        ui.add_space(10.0);
-        ui.label(RichText::new("Open Risks").strong().color(Color32::from_rgb(234, 176, 84)));
-        for risk in &readiness.risks {
-            ui.label(format!("• {risk}"));
-        }
-    }
-    ui.add_space(10.0);
-    ui.label(RichText::new(readiness.recommended_next_step.as_str()).italics());
-}
-
-fn readiness_color(score: u8) -> Color32 {
-    if score >= 80 {
-        Color32::from_rgb(61, 135, 88)
-    } else if score >= 55 {
-        Color32::from_rgb(170, 121, 52)
+fn score_color(score: u8) -> Color32 {
+    if score >= 85 {
+        Color32::from_rgb(108, 201, 125)
+    } else if score >= 65 {
+        Color32::from_rgb(234, 190, 95)
     } else {
-        Color32::from_rgb(152, 61, 55)
+        Color32::from_rgb(230, 114, 91)
     }
 }
 
-fn diagnostic_row(ui: &mut egui::Ui, metric: &str, actual: f32, ideal: f32, severity: DiagnosticSeverity) {
-    let color = severity_color(severity);
-    let pct = (1.0 - ((actual - ideal).abs() / ideal.max(1.0))).clamp(0.0, 1.0);
-    ui.horizontal(|ui| {
-        ui.colored_label(color, metric);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(format!("{actual:.1} / target {ideal:.1}"));
-        });
-    });
-    ui.add(egui::ProgressBar::new(pct).desired_width(ui.available_width()).fill(color));
-    ui.add_space(8.0);
-}
+fn stage_row(ui: &mut egui::Ui, stage: &StageFeedback) {
+    let color = match stage.color_hint {
+        DiagnosticSeverity::Optimal => Color32::from_rgb(100, 196, 119),
+        DiagnosticSeverity::Minor => Color32::from_rgb(224, 184, 90),
+        DiagnosticSeverity::Major => Color32::from_rgb(224, 108, 88),
+    };
 
-fn severity_color(severity: DiagnosticSeverity) -> Color32 {
-    match severity {
-        DiagnosticSeverity::Optimal => Color32::from_rgb(79, 162, 109),
-        DiagnosticSeverity::Minor => Color32::from_rgb(214, 161, 65),
-        DiagnosticSeverity::Major => Color32::from_rgb(194, 77, 62),
-    }
-}
-
-fn stage_cards(ui: &mut egui::Ui, stages: &[StageFeedback]) {
-    for stage in stages {
-        egui::Frame::new()
-            .fill(Color32::from_rgb(23, 31, 36))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(46, 60, 68)))
-            .corner_radius(16.0)
-            .inner_margin(egui::Margin::symmetric(14, 12))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(severity_color(stage.color_hint), stage_name(stage.stage));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(format!("{} / 100", stage.score));
-                    });
-                });
-                ui.label(stage.coaching_note.as_str());
-            });
-        ui.add_space(8.0);
-    }
-}
-
-fn stage_name(stage: ShotStage) -> &'static str {
-    match stage {
-        ShotStage::Idle => "Idle",
-        ShotStage::ReadyStance => "Ready Stance",
-        ShotStage::Load => "Load",
-        ShotStage::SetPoint => "Set Point",
-        ShotStage::Release => "Release",
-        ShotStage::FollowThrough => "Follow Through",
-        ShotStage::Complete => "Complete",
-    }
-}
-
-fn mini_timeline(ui: &mut egui::Ui, shots: &[SessionShotSummary]) {
-    let width = ui.available_width();
-    let desired_size = Vec2::new(width, 128.0);
-    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 14.0, Color32::from_rgb(22, 29, 34));
-
-    if shots.is_empty() {
-        return;
-    }
-
-    let step = rect.width() / shots.len() as f32;
-    for (index, shot) in shots.iter().enumerate() {
-        let x = rect.left() + step * index as f32 + step * 0.5;
-        let h = (rect.height() - 24.0) * (shot.consistency_score as f32 / 100.0);
-        let color = if shot.consistency_score >= 85 {
-            Color32::from_rgb(76, 161, 101)
-        } else if shot.consistency_score >= 65 {
-            Color32::from_rgb(208, 155, 66)
-        } else {
-            Color32::from_rgb(184, 76, 66)
-        };
-        painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(x - step * 0.28, rect.bottom() - h - 10.0),
-                egui::pos2(x + step * 0.28, rect.bottom() - 10.0),
-            ),
-            6.0,
-            color,
-        );
-    }
-}
-
-fn processed_sessions_panel(ui: &mut egui::Ui, sessions: &[ProcessedSessionSummary]) {
-    if sessions.is_empty() {
-        ui.label("No processed sessions have been folded into the corpus yet.");
-        return;
-    }
-
-    for session in sessions {
-        egui::Frame::new()
-            .fill(Color32::from_rgb(23, 31, 36))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(46, 60, 68)))
-            .corner_radius(16.0)
-            .inner_margin(egui::Margin::symmetric(14, 12))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(session.session_key.as_str()).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        pill_label(ui, &format!("{} shots", session.total_shots), Color32::from_rgb(36, 86, 98));
-                    });
-                });
-                ui.label(format!(
-                    "Source: {}   |   Teacher: {}",
-                    session.source_dataset, session.teacher_model
-                ));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    metric_tile_compact(ui, "Paired", session.paired_shots);
-                    metric_tile_compact(ui, "Side Only", session.side_only_shots);
-                    metric_tile_compact(ui, "Angle Only", session.angle_only_shots);
-                });
-            });
-        ui.add_space(8.0);
-    }
-}
-
-fn metric_tile_compact(ui: &mut egui::Ui, title: &str, value: usize) {
     egui::Frame::new()
         .fill(Color32::from_rgb(18, 24, 29))
-        .corner_radius(12.0)
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(14.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
-            ui.set_min_size(Vec2::new(120.0, 54.0));
-            ui.label(RichText::new(title).size(12.0).color(Color32::from_rgb(164, 176, 182)));
-            ui.label(RichText::new(value.to_string()).size(22.0).strong());
+            ui.horizontal(|ui| {
+                ui.colored_label(color, RichText::new(format!("{:?}", stage.stage)).strong());
+                ui.add_space(ui.available_width() - 130.0);
+                ui.label(RichText::new(format!("{} / 100", stage.score)).strong());
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new(stage.coaching_note.as_str()).color(Color32::from_rgb(177, 187, 193)));
         });
-}
-
-fn build_session_buckets(records: &[JanitorShotRecord], sessions: &[ProcessedSessionSummary]) -> Vec<SessionBucket> {
-    sessions
-        .iter()
-        .map(|summary| {
-            let shot_indices = records
-                .iter()
-                .enumerate()
-                .filter_map(|(index, record)| {
-                    let primary_clip = if !record.side_video.is_empty() {
-                        record.side_video.as_str()
-                    } else if !record.angle45_video.is_empty() {
-                        record.angle45_video.as_str()
-                    } else {
-                        record.clip_uid.as_str()
-                    };
-                    let session_key = format!("{} :: {}", record.session_date, primary_clip);
-                    if session_key == summary.session_key {
-                        Some(index)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            SessionBucket {
-                summary: summary.clone(),
-                shot_indices,
-            }
-        })
-        .collect()
-}
-
-fn processed_shot_browser(
-    ui: &mut egui::Ui,
-    app: &mut JumpshotTrainerApp,
-    supervised_score: Option<f32>,
-) {
-    if app.session_buckets.is_empty() {
-        ui.label("No processed session groups available yet.");
-        return;
-    }
-
-    ui.columns(2, |columns| {
-        let (left_cols, right_cols) = columns.split_at_mut(1);
-        let left = &mut left_cols[0];
-        let right = &mut right_cols[0];
-
-        left.label(RichText::new("Sessions").strong());
-        egui::ScrollArea::vertical().max_height(240.0).show(left, |ui| {
-            for (index, bucket) in app.session_buckets.iter().enumerate() {
-                let selected = app.selected_session == index;
-                let label = format!("{} • {} shots", bucket.summary.session_key, bucket.summary.total_shots);
-                if ui
-                    .add(
-                        egui::Button::new(label)
-                            .fill(if selected {
-                                Color32::from_rgb(190, 113, 58)
-                            } else {
-                                Color32::from_rgb(27, 36, 42)
-                            })
-                            .corner_radius(10.0),
-                    )
-                    .clicked()
-                {
-                    app.selected_session = index;
-                    app.selected_shot = 0;
-                }
-                ui.add_space(4.0);
-            }
-        });
-
-        let Some(bucket) = app.session_buckets.get(app.selected_session) else {
-            return;
-        };
-        let manual_seed_count = bucket
-            .shot_indices
-            .iter()
-            .filter(|record_index| app.records[**record_index].has_manual_stage_tags)
-            .count();
-        right.label(RichText::new("Shots").strong());
-        right.add_space(4.0);
-        right.label(format!(
-            "Teacher: {}   |   Paired: {}   |   Manual Seeds: {}",
-            bucket.summary.teacher_model, bucket.summary.paired_shots, manual_seed_count
-        ));
-        egui::ScrollArea::vertical().max_height(240.0).show(right, |ui| {
-            for (local_index, record_index) in bucket.shot_indices.iter().enumerate() {
-                let record = &app.records[*record_index];
-                let selected = app.selected_shot == local_index;
-                let release = record
-                    .release_timing_ms
-                    .or(record.release_time_ms_side)
-                    .or(record.release_time_ms_45)
-                    .unwrap_or_default();
-                let seed_tag = if record.has_manual_stage_tags { " • manual" } else { "" };
-                let label = format!("{} • {:.0} ms{}", record.shot_id, release, seed_tag);
-                if ui
-                    .add(
-                        egui::Button::new(label)
-                            .fill(if selected {
-                                Color32::from_rgb(76, 161, 101)
-                            } else {
-                                Color32::from_rgb(27, 36, 42)
-                            })
-                            .corner_radius(10.0),
-                    )
-                    .clicked()
-                {
-                    app.selected_shot = local_index;
-                }
-                ui.add_space(4.0);
-            }
-        });
-    });
-
-    let Some(bucket) = app.session_buckets.get(app.selected_session) else {
-        return;
-    };
-    let Some(record_index) = bucket.shot_indices.get(app.selected_shot) else {
-        return;
-    };
-    let record = &app.records[*record_index];
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        metric_pair(ui, "Shot Id", record.shot_id.as_str());
-        ui.separator();
-        metric_pair(ui, "Source", record.source_dataset.as_str());
-    });
-    metric_pair(
-        ui,
-        "Views",
-        if record.paired_view_available {
-            "paired side + angle45"
-        } else if !record.side_video.is_empty() {
-            "side only"
-        } else {
-            "angle45 only"
-        },
-    );
-    metric_pair(ui, "Teacher", record.teacher_model.as_str());
-    metric_pair(
-        ui,
-        "Stage Tags",
-        if record.has_manual_stage_tags {
-            "manual-seeded rescue shot"
-        } else {
-            "teacher-segmented"
-        },
-    );
-    metric_pair(ui, "Elbow Flexion", &format!("{:.1}", record.elbow_flexion.unwrap_or_default()));
-    metric_pair(ui, "Knee Load", &format!("{:.1}", record.knee_load.unwrap_or_default()));
-    metric_pair(
-        ui,
-        "Forearm Verticality",
-        &format!("{:.1}", record.forearm_verticality.unwrap_or_default()),
-    );
-    metric_pair(ui, "Elbow Flare", &format!("{:.1}", record.elbow_flare.unwrap_or_default()));
-    metric_pair(
-        ui,
-        "Release Timing",
-        &format!(
-            "{:.0} ms",
-            record
-                .release_timing_ms
-                .or(record.release_time_ms_side)
-                .or(record.release_time_ms_45)
-                .unwrap_or_default()
-        ),
-    );
-    if let Some(score) = supervised_score {
-        metric_pair(ui, "Current Live Supervised Score", &format!("{:.0} / 100", score * 100.0));
-    }
-    ui.add_space(10.0);
-    if accent_button(ui, "Load Selected Shot Into Live Controls").clicked() {
-        app.load_selected_processed_shot();
-    }
-}
-
-fn draw_calibration_preview(ui: &mut egui::Ui, calibration_input: &CalibrationInput) {
-    let desired_size = Vec2::new(ui.available_width(), 260.0);
-    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 20.0, Color32::from_rgb(23, 31, 36));
-
-    let athlete_x = rect.left() + rect.width() * 0.35;
-    let floor_y = rect.bottom() - 24.0;
-    let body_h = (calibration_input.body_height_m * 90.0).clamp(110.0, 180.0);
-    let shoulder_y = floor_y - body_h * 0.72;
-    let head_y = floor_y - body_h;
-    let shoulder_half = calibration_input.shoulder_width_m * 90.0;
-    let cam_x = rect.right() - 74.0;
-    let estimated_mount_height_m = calibration_input.body_height_m * 0.58;
-    let cam_y = floor_y - estimated_mount_height_m * 72.0;
-
-    painter.line_segment(
-        [egui::pos2(athlete_x, floor_y), egui::pos2(athlete_x, head_y)],
-        Stroke::new(8.0, Color32::from_rgb(186, 121, 69)),
-    );
-    painter.line_segment(
-        [egui::pos2(athlete_x - shoulder_half, shoulder_y), egui::pos2(athlete_x + shoulder_half, shoulder_y)],
-        Stroke::new(7.0, Color32::from_rgb(233, 173, 94)),
-    );
-    painter.circle_filled(egui::pos2(athlete_x, head_y - 16.0), 18.0, Color32::from_rgb(243, 216, 151));
-    painter.circle_filled(egui::pos2(cam_x, cam_y), 16.0, Color32::from_rgb(120, 139, 154));
-    painter.line_segment(
-        [egui::pos2(cam_x, cam_y), egui::pos2(athlete_x, shoulder_y)],
-        Stroke::new(2.5, Color32::from_rgb(76, 161, 101)),
-    );
-    painter.text(
-        rect.left_top() + egui::vec2(16.0, 14.0),
-        Align2::LEFT_TOP,
-        "Athlete and camera geometry",
-        FontId::proportional(16.0),
-        Color32::from_rgb(240, 236, 226),
-    );
 }
 
 fn draw_overlay_review(ui: &mut egui::Ui, input: &ShotInput, stages: &[StageFeedback]) {
-    let desired_size = Vec2::new(ui.available_width(), 250.0);
+    let desired_size = Vec2::new(ui.available_width(), 280.0);
     let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 20.0, Color32::from_rgb(23, 31, 36));
+    painter.rect_filled(rect, 22.0, Color32::from_rgb(18, 24, 29));
 
-    let center_x = rect.center().x - 20.0;
-    let floor_y = rect.bottom() - 26.0;
-    let hip_y = floor_y - 92.0;
-    let shoulder_y = hip_y - 74.0;
+    let center_x = rect.center().x - 24.0;
+    let floor_y = rect.bottom() - 28.0;
+    let hip_y = floor_y - 98.0;
+    let shoulder_y = hip_y - 78.0;
     let knee_x = center_x - 12.0;
-    let ankle_x = center_x - 5.0;
-    let elbow_x = center_x + (input.elbow_flare * 3.2).clamp(0.0, 44.0);
-    let wrist_x = elbow_x + 12.0;
-    let wrist_y = floor_y - (input.release_height_ratio * 90.0);
+    let ankle_x = center_x - 4.0;
+    let elbow_x = center_x + (input.elbow_flare * 3.2).clamp(0.0, 48.0);
+    let wrist_x = elbow_x + 14.0;
+    let wrist_y = floor_y - (input.release_height_ratio * 94.0);
 
     let load_color = stage_color_from_feedback(stages, ShotStage::Load);
     let set_color = stage_color_from_feedback(stages, ShotStage::SetPoint);
     let release_color = stage_color_from_feedback(stages, ShotStage::Release);
 
-    painter.line_segment([egui::pos2(center_x, shoulder_y), egui::pos2(center_x, hip_y)], Stroke::new(7.0, Color32::from_rgb(181, 121, 70)));
-    painter.line_segment([egui::pos2(center_x, hip_y), egui::pos2(knee_x, hip_y + 58.0)], Stroke::new(6.0, load_color));
-    painter.line_segment([egui::pos2(knee_x, hip_y + 58.0), egui::pos2(ankle_x, floor_y)], Stroke::new(6.0, load_color));
-    painter.line_segment([egui::pos2(center_x, shoulder_y), egui::pos2(elbow_x, shoulder_y + 44.0)], Stroke::new(6.0, set_color));
-    painter.line_segment([egui::pos2(elbow_x, shoulder_y + 44.0), egui::pos2(wrist_x, wrist_y)], Stroke::new(5.0, release_color));
-    painter.circle_filled(egui::pos2(wrist_x + 18.0, wrist_y - 8.0), 12.0, release_color);
+    painter.line_segment(
+        [egui::pos2(center_x, shoulder_y), egui::pos2(center_x, hip_y)],
+        Stroke::new(7.0, Color32::from_rgb(235, 201, 153)),
+    );
+    painter.line_segment(
+        [egui::pos2(center_x, hip_y), egui::pos2(knee_x, floor_y - 44.0)],
+        Stroke::new(7.0, load_color),
+    );
+    painter.line_segment(
+        [egui::pos2(knee_x, floor_y - 44.0), egui::pos2(ankle_x, floor_y)],
+        Stroke::new(7.0, load_color),
+    );
+    painter.line_segment(
+        [egui::pos2(center_x, shoulder_y), egui::pos2(elbow_x, shoulder_y + 34.0)],
+        Stroke::new(7.0, set_color),
+    );
+    painter.line_segment(
+        [egui::pos2(elbow_x, shoulder_y + 34.0), egui::pos2(wrist_x, wrist_y)],
+        Stroke::new(7.0, release_color),
+    );
+
+    painter.line_segment(
+        [egui::pos2(center_x, shoulder_y - 34.0), egui::pos2(center_x + 2.0, shoulder_y - 6.0)],
+        Stroke::new(7.0, Color32::from_rgb(235, 201, 153)),
+    );
+    painter.circle_filled(egui::pos2(center_x, shoulder_y - 52.0), 18.0, Color32::from_rgb(248, 226, 186));
+
+    painter.text(
+        rect.left_top() + egui::vec2(18.0, 16.0),
+        Align2::LEFT_TOP,
+        "Color guide: green = solid, amber = slight issue, red = clear fix",
+        FontId::proportional(15.0),
+        Color32::from_rgb(196, 204, 208),
+    );
 }
 
 fn stage_color_from_feedback(stages: &[StageFeedback], stage: ShotStage) -> Color32 {
-    stages
-        .iter()
-        .find(|item| item.stage == stage)
-        .map(|item| severity_color(item.color_hint))
-        .unwrap_or(Color32::from_rgb(120, 139, 154))
-}
-
-fn draw_release_panel(ui: &mut egui::Ui, input: &ShotInput) {
-    let desired_size = Vec2::new(ui.available_width(), 186.0);
-    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-
-    painter.rect_filled(rect, 20.0, Color32::from_rgb(23, 31, 36));
-    let center_x = rect.center().x;
-    let floor_y = rect.bottom() - 24.0;
-    let shoulder_y = rect.top() + 58.0;
-    let elbow_offset = (input.elbow_flare * 3.2).clamp(0.0, 44.0);
-    let release_y = floor_y - (input.release_height_ratio * 78.0);
-
-    painter.line_segment([egui::pos2(center_x, floor_y), egui::pos2(center_x, shoulder_y)], Stroke::new(7.0, Color32::from_rgb(181, 121, 70)));
-    painter.line_segment([egui::pos2(center_x, shoulder_y), egui::pos2(center_x + elbow_offset, shoulder_y + 44.0)], Stroke::new(6.0, Color32::from_rgb(223, 160, 74)));
-    painter.line_segment([egui::pos2(center_x + elbow_offset, shoulder_y + 44.0), egui::pos2(center_x + elbow_offset + 12.0, release_y)], Stroke::new(5.0, Color32::from_rgb(239, 206, 126)));
-    let ball_color = if input.release_at_apex_offset_ms <= 20.0 {
-        Color32::from_rgb(76, 161, 101)
-    } else if input.release_at_apex_offset_ms <= 50.0 {
-        Color32::from_rgb(208, 155, 66)
-    } else {
-        Color32::from_rgb(184, 76, 66)
+    let Some(stage_feedback) = stages.iter().find(|item| item.stage == stage) else {
+        return Color32::from_rgb(155, 163, 170);
     };
-    painter.circle_filled(egui::pos2(center_x + elbow_offset + 20.0, release_y - 8.0), 14.0, ball_color);
+    match stage_feedback.color_hint {
+        DiagnosticSeverity::Optimal => Color32::from_rgb(108, 201, 125),
+        DiagnosticSeverity::Minor => Color32::from_rgb(234, 190, 95),
+        DiagnosticSeverity::Major => Color32::from_rgb(230, 114, 91),
+    }
 }
