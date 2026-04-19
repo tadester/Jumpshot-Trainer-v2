@@ -12,6 +12,8 @@ path = "src/lib.rs"
 [dependencies]
 eframe = "0.33"
 egui = "0.33"
+egui_extras = { version = "0.33", features = ["all_loaders", "image"] }
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
 polars = { version = "0.51", default-features = false, features = ["fmt", "parquet"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

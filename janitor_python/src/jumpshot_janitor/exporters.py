@@ -24,7 +24,6 @@ REQUIRED_COLUMNS = [
     "set_point_frame_45",
     "release_frame_45",
     "shot_end_frame_45",
-    "make",
     "shot_type",
     "distance_ft",
     "source_dataset",

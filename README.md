@@ -1,54 +1,77 @@
 # JumpShot Trainer
 
-JumpShot Trainer is a Rust-first biomechanical jump-shot analyzer with a Python video-ingestion pipeline.
+JumpShot Trainer is a desktop jump-shot review app backed by a Python video-processing pipeline.
 
-It takes raw shooting footage, extracts pose and ball signals, segments shots, computes mechanics, exports a shared Parquet corpus, and opens everything in a native Rust desktop review app.
+You give it a shooting clip, choose the camera angle, and the system:
 
-The desktop experience is built around one main flow:
+- ingests the raw video into the project workspace
+- runs pose and ball tracking with the janitor pipeline
+- segments detected shots
+- extracts structured biomechanics features
+- rebuilds a shared Parquet training corpus
+- opens the result in a native Rust review UI
 
-1. launch the app
-2. drop in a video or paste a video path
-3. choose the camera angle
-4. click `Analyze Video`
-5. get coaching feedback on what is wrong and what to adjust
+The current app is built to be useful right now as a visual coaching tool, not just a research prototype.
 
-Suggested GitHub repository description:
+Suggested repository description:
 
-`Rust biomechanics shooting trainer with a Python video-ingestion pipeline, MediaPipe + YOLOv8 teacher models, Parquet feature exports, and a desktop analysis dashboard.`
+`Desktop jump-shot analysis app with a Rust review UI, Python video pipeline, MediaPipe + YOLOv8 teacher extraction, and structured biomechanics exports.`
 
-## What This Project Is
+## What The App Can Do
 
-The project has two main parts:
+Today, the desktop app can:
+
+- accept a video by drag-and-drop, pasted path, or native `Choose File` picker
+- let the user choose `Side View` or `Front Quarter`
+- save a lightweight athlete profile from the upload screen
+- run the janitor pipeline directly from the Rust app
+- generate a visual preview snapshot from the uploaded clip
+- detect one or more shots in the session
+- show rep thumbnails for detected shots in the review selector
+- extract and display a release-frame snapshot for the selected rep
+- show coaching adjustments for the current shot
+- show mechanical snapshot cards for extracted metrics
+- show phase-by-phase feedback with `score / 100`
+- draw a simplified visual overlay review panel
+- print explicit model scores to terminal output while keeping the UI focused on visuals and coaching
+
+## Project Structure
+
+The repo has two main components:
 
 - `janitor_python/`
-  Ingests raw video, stores manifests, runs teacher models, segments shots, extracts biomechanics features, and exports Parquet.
+  Video intake, metadata capture, teacher-model processing, shot segmentation, feature export, and corpus generation.
 - `athlete_rust/`
-  Loads the processed corpus, fits a lightweight supervised score layer, and provides the desktop calibration and review experience.
+  Native desktop UI plus the Rust-side mechanics review and lightweight scoring layer.
 
-In practice, the flow is:
+Supporting folders:
 
-1. Record shooting footage from side and front-quarter angles.
-2. Intake and process the videos with the Python janitor.
-3. Rebuild the shared training corpus.
-4. Launch the Rust desktop app and analyze a clip from a focused upload-and-review screen.
+- `datasets/uploads/`
+  Raw uploaded clips, manifests, processed sessions, temporary app snapshots, and tuning files.
+- `datasets/shared/processed/`
+  Shared training corpus exported as Parquet and metadata.
+- `datasets/calibration_20_shot/`
+  Calibration and validation data.
+- `datasets/models/mediapipe/`
+  Local MediaPipe model assets.
+- `schemas/`
+  Shared schema definitions.
 
-## Current Capabilities
+## Current Pipeline
 
-Working today:
+The current end-to-end flow looks like this:
 
-- raw upload intake
-- per-clip manifest generation
-- MediaPipe + YOLOv8 teacher pipeline with fallbacks
-- automatic shot segmentation
-- automatic rescue on previously weak sessions
-- biomechanics feature extraction
-- Parquet corpus generation
-- side/front pairing heuristics
-- focused desktop upload-and-analyze flow
-- per-shot coaching review
-- lightweight supervised Rust-side scoring
+1. A clip is selected in the Rust desktop app.
+2. The app creates or updates an athlete profile JSON under `datasets/uploads/`.
+3. The app calls the Python janitor CLI to ingest the video and write a manifest.
+4. The janitor runs the stronger teacher pipeline with MediaPipe and YOLOv8-based extraction.
+5. Shot records are exported and the shared training corpus is rebuilt.
+6. Rust loads the processed shot records, analyzes the selected shot, and renders the review UI.
+7. The app extracts visual snapshots from the clip for preview and release context.
 
-Current extracted mechanics include:
+## Extracted Mechanics
+
+The structured shot features currently include:
 
 - elbow flexion
 - knee load
@@ -56,8 +79,25 @@ Current extracted mechanics include:
 - elbow flare
 - release height ratio
 - release timing
-- release vs apex offset
+- release vs. apex offset
 - jump height
+
+These features feed both the coaching view and the lightweight Rust-side supervised score layer.
+
+## Desktop Review Experience
+
+After analysis completes, the app currently shows:
+
+- a large preview image from the uploaded clip
+- shot label and rep count summary cards
+- a rep selector with extracted thumbnails
+- coaching cards under `What To Adjust`
+- a `Mechanical Snapshot` section with the main extracted metrics
+- a `Shot Phases` section with phase feedback and per-phase scores
+- a release snapshot for the selected rep
+- a simplified visual overlay panel for the motion pattern
+
+The UI is intentionally focused on coaching and visuals. Explicit model scores are logged to standard output instead of being the main visual element on screen.
 
 ## Quick Start
 
@@ -72,20 +112,34 @@ pip install -e .
 
 ### 2. Make Sure Model Assets Exist
 
-Recommended local assets:
+Expected local assets:
 
 - `yolov8n.pt`
 - `yolov8n-pose.pt`
 - `datasets/models/mediapipe/pose_landmarker_lite.task`
 
-### 3. Put Videos In The Inbox
+### 3. Run The Desktop App
 
-- side clips:
-  `/Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/datasets/uploads/inbox/side`
-- front-quarter clips:
-  `/Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/datasets/uploads/inbox/front`
+```bash
+cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/athlete_rust
+cargo run
+```
 
-### 4. Intake A Clip
+### 4. Analyze A Clip
+
+Inside the app:
+
+1. drag a video into the window, paste a full path, or click `Choose File`
+2. select `Side View` or `Front Quarter`
+3. fill in or confirm the athlete form values
+4. click `Analyze Video`
+5. review the generated snapshots, shot selector thumbnails, coaching cards, metrics, and phase scores
+
+## CLI Workflow
+
+If you want to run the janitor pipeline manually instead of through the desktop app, the main commands are:
+
+### Intake A Clip
 
 ```bash
 cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2
@@ -95,41 +149,25 @@ janitor_python/.venv/bin/jumpshot-janitor intake-video \
   --view side
 ```
 
-Use `--view angle45` for the front-quarter camera.
+Use `--view angle45` for front-quarter video.
 
-### 5. Process A Session
+### Process A Session
 
 ```bash
 cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2
 janitor_python/.venv/bin/jumpshot-janitor strong-process \
   --project-root . \
   --manifest datasets/uploads/manifests/<manifest>.json \
-  --athlete-profile datasets/calibration_20_shot/annotations/athlete_profile.json \
+  --athlete-profile datasets/uploads/app_athlete.json \
   --source-dataset uploaded_session \
   --teacher-model mediapipe_yolov8_teacher \
-  --frame-stride 30 \
+  --frame-stride 1 \
   --yolo-weights yolov8n.pt \
   --pose-weights yolov8n-pose.pt \
   --mediapipe-model datasets/models/mediapipe/pose_landmarker_lite.task
 ```
 
-Optional last-resort rescue path:
-
-```bash
-janitor_python/.venv/bin/jumpshot-janitor strong-process \
-  --project-root . \
-  --manifest datasets/uploads/manifests/<manifest>.json \
-  --athlete-profile datasets/calibration_20_shot/annotations/athlete_profile.json \
-  --source-dataset uploaded_session \
-  --teacher-model mediapipe_yolov8_teacher \
-  --frame-stride 30 \
-  --yolo-weights yolov8n.pt \
-  --pose-weights yolov8n-pose.pt \
-  --mediapipe-model datasets/models/mediapipe/pose_landmarker_lite.task \
-  --tuning datasets/uploads/tuning/<session>.json
-```
-
-### 6. Rebuild The Shared Corpus
+### Rebuild The Shared Corpus
 
 ```bash
 cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2
@@ -141,171 +179,39 @@ This writes:
 - `datasets/shared/processed/training_corpus.parquet`
 - `datasets/shared/processed/training_corpus.metadata.json`
 
-### 7. Run The Rust App
+## What “Training” Means Here
 
-```bash
-cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/athlete_rust
-cargo run
-```
+This is not yet an end-to-end learned biomechanics model.
 
-When the app opens:
-
-1. drag a video into the window or paste its full path
-2. choose `Side View` or `Front Quarter`
-3. click `Analyze Video`
-4. review the detected shots, coaching adjustments, phase feedback, and mechanical snapshot
-
-### 8. Verify Everything Builds
-
-```bash
-cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2
-janitor_python/.venv/bin/python -m py_compile \
-  janitor_python/src/jumpshot_janitor/cli.py \
-  janitor_python/src/jumpshot_janitor/video_pipeline.py \
-  janitor_python/src/jumpshot_janitor/exporters.py
-
-cd /Users/ktr/Developer/GitHub/Jumpshot-Trainer-v2/athlete_rust
-cargo check
-```
-
-## How The App Works
-
-### Video Intake
-
-The janitor stores:
-
-- raw clip copy
-- manifest JSON
-- fps
-- resolution
-- duration
-- orientation
-
-This gives the repo a stable raw-video archive under `datasets/uploads/`.
-
-### Teacher Extraction
-
-The current teacher stack is:
-
-- YOLOv8 for basketball detection
-- MediaPipe pose when it initializes
-- YOLO pose fallback
-- built-in pose heuristic fallback if stronger pose extraction is unavailable
-
-### Shot Segmentation
-
-The current segmentation stack is layered:
-
-- primary ball-hand separation logic
-- multi-signal fallback using wrist lift, release height, and jump motion
-- wrist-only fallback
-- cycle and valley fallbacks
-- manual seeding only when automatic segmentation still fails
-
-This matters because weak sessions are no longer forced into manual tagging first.
-
-### Feature Extraction
-
-For each shot, Python computes structured biomechanics features and exports them into Parquet.
-
-Rust then reads those records and uses them for:
-
-- diagnostics
-- session summaries
-- processed-shot browsing
-- model-readiness status
-- lightweight supervised scoring
-
-## What “Trained” Means Right Now
-
-This is not yet a fully trained end-to-end production vision system.
-
-Right now the project is:
+Right now the system is:
 
 - teacher-driven for perception
-- feature-driven for biomechanics
-- supervised only at the Rust structured-feature scoring layer
+- feature-driven for mechanics
+- lightly supervised on the Rust side for structured-score prediction
 
-So the current model stack is:
+In practice:
 
-1. Teacher models detect pose and ball signals.
-2. Geometry and temporal logic convert those into biomechanics features.
-3. Rust reads the resulting feature corpus and fits a lightweight supervised score model.
+1. teacher models detect pose and ball signals
+2. temporal and geometric logic convert those signals into shot features
+3. Rust reads the processed features and fits or applies a lightweight score layer
 
-That means the app is already useful, but it is not yet the final long-term learned biomechanics engine.
-
-## Training Status
-
-Today, the system is best described as:
-
-- teacher-labeled
-- feature-driven
-- lightly supervised on the structured corpus
-
-Long-term improvements still wanted:
-
-- larger multi-athlete corpus
-- more paired side/front sessions
-- more trusted gold annotations
-- stronger stage ground truth
-- a true Rust-side Candle training pass on normalized tensors
-
-## What The Rust App Shows
-
-The Rust desktop app currently includes:
-
-- a focused upload panel
-- background processing status
-- per-shot review after analysis
-- coaching adjustments
-- phase feedback
-- mechanical snapshot cards
-- a visual overlay review panel
-- hidden engine details for corpus and model background status
-
-## Current Repo State
-
-Validated recently:
-
-- 4 uploaded videos were ingested and processed
-- the two previously weak sessions now auto-segment without manual seeds
-- the shared corpus contains uploaded-session rows and paired-view rows
-- only a small manual-stage-tagged remainder is still in the corpus
-- Python compile checks pass
-- Rust `cargo check` passes
-
-Still being tuned:
-
-- shot count realism on long sessions
-- release timing realism on sparse-stride runs
-- pairing quality between independently recorded sessions
-- broader generalization to more athletes and camera setups
-
-## Folder Overview
-
-- `athlete_rust/`
-  Rust desktop application and analysis engine.
-- `janitor_python/`
-  Python ingestion and export pipeline.
-- `datasets/uploads/`
-  Raw session archive, manifests, processed sessions, inbox, and tuning files.
-- `datasets/calibration_20_shot/`
-  Manual or semi-manual gold validation data.
-- `datasets/shared/processed/`
-  Shared Parquet corpus read by Rust.
-- `datasets/models/mediapipe/`
-  Local MediaPipe task models.
-- `schemas/`
-  Shared schema contracts.
-- `docs/`
-  Architecture and product notes.
+That means the app is already practical for review and coaching, while the longer-term model story is still evolving.
 
 ## Troubleshooting
 
-- If MediaPipe fails on macOS, the janitor should fall back automatically instead of crashing.
-- If a clip still does not segment cleanly, use the `--tuning` path with a session JSON under `datasets/uploads/tuning/`.
-- If the Rust app opens with older data, rebuild the corpus first.
+- If the desktop app finishes analysis but no shots appear, the janitor likely did not detect a usable rep from that clip.
+- If visual snapshots do not appear, make sure the janitor Python environment exists and can import OpenCV.
+- If the app shows stale processed data, rerun analysis or rebuild the shared corpus.
+- If MediaPipe is unavailable on a machine, the janitor pipeline is designed to fall back rather than block the whole review flow.
 
-## Project Goal
+## Status
 
-The goal is a real Rust desktop jump-shot trainer that can eventually analyze arbitrary athletes from uploaded video, compare mechanics over time, and grow into a stronger supervised biomechanics system without discarding the current practical MVP pipeline.
+Current product direction:
+
+- native Rust desktop review
+- Python-backed video ingestion and teacher extraction
+- structured biomechanics exports
+- visual shot review with snapshots and thumbnails
+- coaching-focused UI instead of raw-score-first UI
+
+The long-term goal is a stronger jump-shot training system that keeps the current practical upload-and-review workflow while improving model quality, pairing accuracy, and generalization across athletes and recording conditions.

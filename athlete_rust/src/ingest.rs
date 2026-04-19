@@ -61,6 +61,10 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
     let file = File::open(path)?;
     let frame = ParquetReader::new(file).finish()?;
 
+    if frame.height() == 0 {
+        return Ok(Vec::new());
+    }
+
     let athlete_id = frame.column("athlete_id")?;
     let shot_id = frame.column("shot_id")?;
     let session_date = frame.column("session_date")?;
@@ -71,7 +75,6 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
     let release_frame_side = frame.column("release_frame_side")?;
     let set_point_frame_45 = frame.column("set_point_frame_45")?;
     let release_frame_45 = frame.column("release_frame_45")?;
-    let make = frame.column("make")?;
     let shot_type = frame.column("shot_type")?;
     let distance_ft = frame.column("distance_ft")?;
     let notes = frame.column("notes")?;
@@ -114,10 +117,6 @@ pub fn load_janitor_shot_records(path: impl AsRef<Path>) -> PolarsResult<Vec<Jan
             release_frame_side: opt_i64_value(release_frame_side, index),
             set_point_frame_45: opt_i64_value(set_point_frame_45, index),
             release_frame_45: opt_i64_value(release_frame_45, index),
-            make: match make.get(index) {
-                Ok(AnyValue::Boolean(value)) => Some(value),
-                _ => None,
-            },
             shot_type: string_value(shot_type, index),
             distance_ft: opt_f32_value(distance_ft, index),
             notes: string_value(notes, index),

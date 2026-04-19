@@ -222,7 +222,6 @@ pub struct JanitorShotRecord {
     pub release_frame_side: Option<i64>,
     pub set_point_frame_45: Option<i64>,
     pub release_frame_45: Option<i64>,
-    pub make: Option<bool>,
     pub shot_type: String,
     pub distance_ft: Option<f32>,
     pub notes: String,

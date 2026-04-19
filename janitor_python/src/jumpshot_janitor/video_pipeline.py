@@ -756,8 +756,13 @@ def _segment_shots(frame_df: pd.DataFrame) -> pd.DataFrame:
     cycle_windows = _refine_shot_windows(_segment_shots_from_cycles(frame_df), frame_df)
     if not cycle_windows.empty:
         return cycle_windows
-    return _refine_shot_windows(_segment_shots_from_valleys(frame_df), frame_df)
-
+    
+    valley_windows = _refine_shot_windows(_segment_shots_from_valleys(frame_df), frame_df)
+    if not valley_windows.empty:
+        return valley_windows
+        
+    fallback = _segment_shots_fallback_global(frame_df)
+    return _refine_shot_windows(fallback, frame_df)
 
 def _manual_shot_windows(tuning: dict[str, Any]) -> pd.DataFrame:
     manual = tuning.get("manual_shots", [])
@@ -1060,6 +1065,41 @@ def _segment_shots_from_valleys(frame_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(shots)
 
 
+def _segment_shots_fallback_global(frame_df: pd.DataFrame) -> pd.DataFrame:
+    if frame_df.empty:
+        return pd.DataFrame()
+
+    wrist_subset = frame_df[frame_df["wrist_y"].notna()] if "wrist_y" in frame_df.columns else pd.DataFrame()
+    hip_subset = frame_df[frame_df["hip_y"].notna()] if "hip_y" in frame_df.columns else pd.DataFrame()
+
+    peak_frame = None
+    if not wrist_subset.empty:
+        peak_frame = int(wrist_subset.loc[wrist_subset["wrist_y"].idxmin(), "frame_index"])
+    elif not hip_subset.empty:
+        peak_frame = int(hip_subset.loc[hip_subset["hip_y"].idxmin(), "frame_index"])
+    else:
+        peak_frame = int(frame_df["frame_index"].median())
+
+    start_frame = max(int(frame_df["frame_index"].min()), peak_frame - 20)
+    end_frame = min(int(frame_df["frame_index"].max()), peak_frame + 20)
+
+    apex_frame = peak_frame
+    if not hip_subset.empty:
+        window = hip_subset[(hip_subset["frame_index"] >= start_frame) & (hip_subset["frame_index"] <= end_frame)]
+        if not window.empty:
+            apex_frame = int(window.loc[window["hip_y"].idxmin(), "frame_index"])
+
+    return pd.DataFrame([{
+        "shot_id": "shot_001_fallback",
+        "shot_start_frame": start_frame,
+        "set_point_frame": peak_frame,
+        "release_frame": peak_frame,
+        "shot_end_frame": end_frame,
+        "apex_frame": apex_frame,
+    }])
+
+
+
 def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.DataFrame:
     if shot_df.empty:
         return shot_df
@@ -1068,6 +1108,7 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
     last_end_frame: int | None = None
     frame_indices = set(frame_df["frame_index"].astype(int).tolist())
     frame_interval_ms = max(1.0, float(frame_df["timestamp_ms"].diff().dropna().median() or 33.0))
+    is_still_image = len(frame_df) <= 3
 
     for _, shot in shot_df.sort_values("shot_start_frame").iterrows():
         start_frame = int(shot["shot_start_frame"])
@@ -1126,7 +1167,7 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
             release_frame = set_point_frame
         if last_end_frame is not None and start_frame <= last_end_frame:
             start_frame = last_end_frame + 1
-        if start_frame >= end_frame:
+        if start_frame >= end_frame and not is_still_image:
             continue
 
         if set_point_frame not in frame_indices or release_frame not in frame_indices:
@@ -1148,11 +1189,11 @@ def _refine_shot_windows(shot_df: pd.DataFrame, frame_df: pd.DataFrame) -> pd.Da
         max_duration_ms = max(4500.0, frame_interval_ms * 10.0)
         max_release_delay_ms = max(2500.0, frame_interval_ms * 3.5)
 
-        if duration_ms < min_duration_ms or duration_ms > max_duration_ms:
+        if (duration_ms < min_duration_ms or duration_ms > max_duration_ms) and not is_still_image:
             continue
-        if release_delay_ms < 0.0 or release_delay_ms > max_release_delay_ms:
+        if (release_delay_ms < 0.0 or release_delay_ms > max_release_delay_ms) and not is_still_image:
             continue
-        if release_delay_ms > duration_ms:
+        if release_delay_ms > duration_ms and not is_still_image:
             continue
 
         last_end_frame = end_frame
@@ -1218,7 +1259,6 @@ def _extract_shot_features(
                 "set_point_frame_45": int(shot["set_point_frame"]) if manifest.view == "angle45" else None,
                 "release_frame_45": int(shot["release_frame"]) if manifest.view == "angle45" else None,
                 "shot_end_frame_45": int(shot["shot_end_frame"]) if manifest.view == "angle45" else None,
-                "make": None,
                 "shot_type": "jump_shot",
                 "distance_ft": None,
                 "source_dataset": source_dataset,
