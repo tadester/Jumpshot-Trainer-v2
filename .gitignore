@@ -18,6 +18,7 @@ datasets/uploads/raw/
 datasets/uploads/processed/
 datasets/uploads/inbox/front/*
 datasets/uploads/inbox/side/*
+datasets/data/
 
 !.gitkeep
 !datasets/uploads/inbox/front/.gitkeep

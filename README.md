@@ -179,7 +179,7 @@ This writes:
 - `datasets/shared/processed/training_corpus.parquet`
 - `datasets/shared/processed/training_corpus.metadata.json`
 
-## What “Training” Means Here
+## What "Training" Means Here
 
 This is not yet an end-to-end learned biomechanics model.
 
