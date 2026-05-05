@@ -2,7 +2,8 @@ use biomech_ai::ingest::load_janitor_shot_records;
 use biomech_ai::trainer::{analyze_shot, TrainerSnapshot};
 use biomech_ai::training::{
     build_training_examples, calibration_input_from_record, feature_vector_from_shot_input,
-    predict_supervised_score, shot_input_from_record, summarize_training_dataset, train_supervised_score_model,
+    predict_supervised_score, shot_input_from_record, summarize_training_dataset,
+    train_supervised_score_model,
 };
 use biomech_ai::types::{
     CalibrationInput, DiagnosticSeverity, JanitorShotRecord, ShotInput, ShotStage, StageFeedback,
@@ -10,6 +11,7 @@ use biomech_ai::types::{
 };
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Stroke, TextureHandle, Vec2};
 use image::io::Reader as ImageReader;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
@@ -51,7 +53,6 @@ impl ClipView {
             Self::Angle45 => "Front Quarter",
         }
     }
-
 }
 
 #[derive(Clone)]
@@ -68,6 +69,21 @@ struct AnalysisRunResult {
     shot_records: Vec<JanitorShotRecord>,
     corpus: LoadedCorpus,
     selected_view: ClipView,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreflightStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+#[derive(Clone)]
+struct PreflightCheck {
+    label: String,
+    detail: String,
+    status: PreflightStatus,
+    required: bool,
 }
 
 enum WorkerEvent {
@@ -100,6 +116,7 @@ struct JumpshotTrainerApp {
     shot_thumbnail_paths: Vec<Option<PathBuf>>,
     shot_thumbnail_textures: Vec<Option<TextureHandle>>,
     texture_revision: u64,
+    preflight_checks: Vec<PreflightCheck>,
 }
 
 impl JumpshotTrainerApp {
@@ -122,13 +139,24 @@ impl JumpshotTrainerApp {
         let generated_profile_path = project_root.join("datasets/uploads/app_athlete.json");
         if let Ok(content) = std::fs::read_to_string(&generated_profile_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(n) = json.get("name").and_then(|v| v.as_str()) { athlete_name = n.to_string(); }
-                if let Some(h) = json.get("handedness").and_then(|v| v.as_str()) { athlete_handedness = h.to_string(); }
-                if let Some(h) = json.get("height_m").and_then(|v| v.as_f64()) { athlete_height_m = format!("{:.2}", h); }
-                if let Some(w) = json.get("wingspan_m").and_then(|v| v.as_f64()) { athlete_wingspan_m = format!("{:.2}", w); }
-                if let Some(r) = json.get("standing_reach_m").and_then(|v| v.as_f64()) { athlete_standing_reach_m = format!("{:.2}", r); }
+                if let Some(n) = json.get("name").and_then(|v| v.as_str()) {
+                    athlete_name = n.to_string();
+                }
+                if let Some(h) = json.get("handedness").and_then(|v| v.as_str()) {
+                    athlete_handedness = h.to_string();
+                }
+                if let Some(h) = json.get("height_m").and_then(|v| v.as_f64()) {
+                    athlete_height_m = format!("{:.2}", h);
+                }
+                if let Some(w) = json.get("wingspan_m").and_then(|v| v.as_f64()) {
+                    athlete_wingspan_m = format!("{:.2}", w);
+                }
+                if let Some(r) = json.get("standing_reach_m").and_then(|v| v.as_f64()) {
+                    athlete_standing_reach_m = format!("{:.2}", r);
+                }
             }
         }
+        let preflight_checks = run_preflight_checks(&project_root);
 
         Self {
             project_root: project_root.clone(),
@@ -141,7 +169,8 @@ impl JumpshotTrainerApp {
             athlete_standing_reach_m,
             analysis_receiver: None,
             is_processing: false,
-            status_message: "Drop a shooting clip into the window or paste a path to start.".to_string(),
+            status_message: "Drop a shooting clip into the window or paste a path to start."
+                .to_string(),
             error_message: None,
             loaded_corpus: load_corpus_state(&project_root),
             analysis_result: None,
@@ -154,6 +183,7 @@ impl JumpshotTrainerApp {
             shot_thumbnail_paths: Vec::new(),
             shot_thumbnail_textures: Vec::new(),
             texture_revision: 0,
+            preflight_checks,
         }
     }
 
@@ -181,7 +211,9 @@ impl JumpshotTrainerApp {
                         self.log_all_model_scores();
                         self.log_selected_shot_score();
 
-                        self.status_message = "Analysis complete. Review the shot constraints and image data above.".to_string();
+                        self.status_message =
+                            "Analysis complete. Review the shot constraints and image data above."
+                                .to_string();
                         should_clear = true;
                     }
                     WorkerEvent::Failed(message) => {
@@ -200,13 +232,33 @@ impl JumpshotTrainerApp {
     }
 
     fn start_analysis(&mut self, ctx: &egui::Context) {
+        self.preflight_checks = run_preflight_checks(&self.project_root);
+        let failed_required: Vec<String> = self
+            .preflight_checks
+            .iter()
+            .filter(|check| check.required && check.status == PreflightStatus::Fail)
+            .map(|check| check.label.clone())
+            .collect();
+        if !failed_required.is_empty() {
+            self.error_message = Some(format!(
+                "Preflight failed: {}. Fix the missing setup items, then run analysis again.",
+                failed_required.join(", ")
+            ));
+            return;
+        }
+
         let clip_path = PathBuf::from(self.selected_clip_path.trim());
         if self.selected_clip_path.trim().is_empty() {
-            self.error_message = Some("Choose a video first. Drag one into the app or paste the full file path.".to_string());
+            self.error_message = Some(
+                "Choose a video first. Drag one into the app or paste the full file path."
+                    .to_string(),
+            );
             return;
         }
         if !clip_path.exists() {
-            self.error_message = Some("That video path does not exist. Check the file path and try again.".to_string());
+            self.error_message = Some(
+                "That video path does not exist. Check the file path and try again.".to_string(),
+            );
             return;
         }
 
@@ -231,23 +283,26 @@ impl JumpshotTrainerApp {
             }
         }
 
-        
         let generated_profile_path = project_root.join("datasets/uploads/app_athlete.json");
         std::fs::create_dir_all(generated_profile_path.parent().unwrap()).ok();
         let height_val: f32 = self.athlete_height_m.parse().unwrap_or(1.88);
         let wingspan_val: f32 = self.athlete_wingspan_m.parse().unwrap_or(1.95);
         let reach_val: f32 = self.athlete_standing_reach_m.parse().unwrap_or(2.40);
-        
+
         let json_content = format!(
             r#"{{ "athlete_id": "app_user", "name": "{}", "handedness": "{}", "height_m": {}, "wingspan_m": {}, "standing_reach_m": {} }}"#,
             self.athlete_name.replace("\"", ""),
-            if self.athlete_handedness == "right" { "right" } else { "left" },
+            if self.athlete_handedness == "right" {
+                "right"
+            } else {
+                "left"
+            },
             height_val,
             wingspan_val,
             reach_val
         );
         std::fs::write(&generated_profile_path, json_content).ok();
-        
+
         let athlete_profile = generated_profile_path;
         let selected_view = self.selected_view;
         let (sender, receiver) = mpsc::channel();
@@ -316,7 +371,12 @@ impl JumpshotTrainerApp {
         };
 
         let release_out = self.project_root.join("datasets/uploads/app_release.jpg");
-        extract_video_frame(&self.project_root, &result.clip_path, release_frame.max(0), &release_out)?;
+        extract_video_frame(
+            &self.project_root,
+            &result.clip_path,
+            release_frame.max(0),
+            &release_out,
+        )?;
         self.set_release_image(ctx, Some(release_out));
         Ok(())
     }
@@ -331,13 +391,19 @@ impl JumpshotTrainerApp {
                 .join(format!("datasets/uploads/app_rep_thumb_{index}.jpg"));
 
             let frame_index = preferred_thumbnail_frame(record, result.selected_view);
-            let texture = frame_index
-                .and_then(|frame| {
-                    extract_video_frame(&self.project_root, &result.clip_path, frame.max(0), &thumb_path).ok()?;
-                    load_texture_from_path(ctx, &thumb_path, &self.next_texture_name("rep-thumb")).ok()
-                });
+            let texture = frame_index.and_then(|frame| {
+                extract_video_frame(
+                    &self.project_root,
+                    &result.clip_path,
+                    frame.max(0),
+                    &thumb_path,
+                )
+                .ok()?;
+                load_texture_from_path(ctx, &thumb_path, &self.next_texture_name("rep-thumb")).ok()
+            });
 
-            self.shot_thumbnail_paths.push(texture.as_ref().map(|_| thumb_path));
+            self.shot_thumbnail_paths
+                .push(texture.as_ref().map(|_| thumb_path));
             self.shot_thumbnail_textures.push(texture);
         }
     }
@@ -348,16 +414,16 @@ impl JumpshotTrainerApp {
     }
 
     fn set_preview_image(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
-        self.preview_texture = path
-            .as_ref()
-            .and_then(|path| load_texture_from_path(ctx, path, &self.next_texture_name("preview")).ok());
+        self.preview_texture = path.as_ref().and_then(|path| {
+            load_texture_from_path(ctx, path, &self.next_texture_name("preview")).ok()
+        });
         self.preview_image_path = path;
     }
 
     fn set_release_image(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
-        self.release_texture = path
-            .as_ref()
-            .and_then(|path| load_texture_from_path(ctx, path, &self.next_texture_name("release")).ok());
+        self.release_texture = path.as_ref().and_then(|path| {
+            load_texture_from_path(ctx, path, &self.next_texture_name("release")).ok()
+        });
         self.release_image_path = path;
     }
 
@@ -411,7 +477,11 @@ impl eframe::App for JumpshotTrainerApp {
                     if self.is_processing {
                         ui.add_space(14.0);
                         shell_card(ui, |ui| {
-                            processing_panel(ui, &self.status_message, self.preview_texture.as_ref());
+                            processing_panel(
+                                ui,
+                                &self.status_message,
+                                self.preview_texture.as_ref(),
+                            );
                         });
                     }
 
@@ -459,7 +529,11 @@ impl eframe::App for JumpshotTrainerApp {
                                     metric_summary(ui, &input, &snapshot);
                                 });
                                 shell_card(right, |ui| {
-                                    stage_panel(ui, &snapshot.stage_feedback, self.release_texture.as_ref());
+                                    stage_panel(
+                                        ui,
+                                        &snapshot.stage_feedback,
+                                        self.release_texture.as_ref(),
+                                    );
                                 });
                             });
 
@@ -483,7 +557,7 @@ fn extract_video_frame(
     frame_index: i64,
     output_path: &Path,
 ) -> Result<(), String> {
-    let janitor_python = project_root.join("janitor_python/.venv/bin/python");
+    let janitor_python = python_executable_path(project_root);
     if !janitor_python.exists() {
         return Err(format!(
             "Frame extraction python not found at {}",
@@ -537,15 +611,20 @@ fn run_analysis_pipeline(
     athlete_profile: &Path,
     sender: &mpsc::Sender<WorkerEvent>,
 ) -> Result<(), String> {
-    let janitor = project_root.join("janitor_python/.venv/bin/jumpshot-janitor");
+    let janitor = janitor_cli_path(project_root);
     if !janitor.exists() {
         return Err(format!("Janitor CLI not found at {}", janitor.display()));
     }
     if !athlete_profile.exists() {
-        return Err(format!("Athlete profile not found at {}", athlete_profile.display()));
+        return Err(format!(
+            "Athlete profile not found at {}",
+            athlete_profile.display()
+        ));
     }
 
-    let _ = sender.send(WorkerEvent::Status("Copying clip into the workspace...".to_string()));
+    let _ = sender.send(WorkerEvent::Status(
+        "Copying clip into the workspace...".to_string(),
+    ));
     let intake_output = run_command(
         Command::new(&janitor)
             .current_dir(project_root)
@@ -557,10 +636,14 @@ fn run_analysis_pipeline(
             .arg("--view")
             .arg(selected_view.as_cli()),
     )?;
-    let manifest_path = parse_labeled_path(&intake_output, "Wrote intake manifest: ")
-        .ok_or_else(|| format!("Could not find manifest path in janitor output:\n{intake_output}"))?;
+    let manifest_path =
+        parse_labeled_path(&intake_output, "Wrote intake manifest: ").ok_or_else(|| {
+            format!("Could not find manifest path in janitor output:\n{intake_output}")
+        })?;
 
-    let _ = sender.send(WorkerEvent::Status("Running pose, ball, and shot analysis...".to_string()));
+    let _ = sender.send(WorkerEvent::Status(
+        "Running pose, ball, and shot analysis...".to_string(),
+    ));
     let strong_output = run_command(
         Command::new(&janitor)
             .current_dir(project_root)
@@ -585,12 +668,18 @@ fn run_analysis_pipeline(
             .arg(project_root.join("datasets/models/mediapipe/pose_landmarker_lite.task")),
     )?;
 
-    let shots_parquet = parse_labeled_path(&strong_output, "Wrote shots_parquet: ")
-        .ok_or_else(|| format!("Could not find shot parquet path in janitor output:\n{strong_output}"))?;
-    let session_json = parse_labeled_path(&strong_output, "Wrote session_json: ")
-        .ok_or_else(|| format!("Could not find session json path in janitor output:\n{strong_output}"))?;
+    let shots_parquet =
+        parse_labeled_path(&strong_output, "Wrote shots_parquet: ").ok_or_else(|| {
+            format!("Could not find shot parquet path in janitor output:\n{strong_output}")
+        })?;
+    let session_json =
+        parse_labeled_path(&strong_output, "Wrote session_json: ").ok_or_else(|| {
+            format!("Could not find session json path in janitor output:\n{strong_output}")
+        })?;
 
-    let _ = sender.send(WorkerEvent::Status("Refreshing the shared model corpus...".to_string()));
+    let _ = sender.send(WorkerEvent::Status(
+        "Refreshing the shared model corpus...".to_string(),
+    ));
     let _ = run_command(
         Command::new(&janitor)
             .current_dir(project_root)
@@ -616,6 +705,148 @@ fn run_analysis_pipeline(
     };
     let _ = sender.send(WorkerEvent::Completed(result));
     Ok(())
+}
+
+fn python_executable_path(project_root: &Path) -> PathBuf {
+    let venv = project_root.join("janitor_python").join(".venv");
+    if cfg!(target_os = "windows") {
+        venv.join("Scripts").join("python.exe")
+    } else {
+        venv.join("bin").join("python")
+    }
+}
+
+fn janitor_cli_path(project_root: &Path) -> PathBuf {
+    let venv = project_root.join("janitor_python").join(".venv");
+    if cfg!(target_os = "windows") {
+        venv.join("Scripts").join("jumpshot-janitor.exe")
+    } else {
+        venv.join("bin").join("jumpshot-janitor")
+    }
+}
+
+fn check_writable_dir(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+    let probe_path = path.join(".jumpshot_write_probe");
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&probe_path)
+        .map_err(|error| format!("Could not write to {}: {error}", path.display()))?;
+    let _ = std::fs::remove_file(probe_path);
+    Ok(())
+}
+
+fn run_preflight_checks(project_root: &Path) -> Vec<PreflightCheck> {
+    let python = python_executable_path(project_root);
+    let janitor = janitor_cli_path(project_root);
+    let yolo = project_root.join("yolov8n.pt");
+    let yolo_pose = project_root.join("yolov8n-pose.pt");
+    let mediapipe = project_root
+        .join("datasets")
+        .join("models")
+        .join("mediapipe")
+        .join("pose_landmarker_lite.task");
+    let upload_dirs = [
+        project_root.join("datasets").join("uploads"),
+        project_root.join("datasets").join("uploads").join("raw"),
+        project_root
+            .join("datasets")
+            .join("uploads")
+            .join("processed"),
+        project_root
+            .join("datasets")
+            .join("uploads")
+            .join("manifests"),
+    ];
+
+    let mut checks = Vec::new();
+    checks.push(path_check("Python venv", &python, true));
+    checks.push(path_check("Janitor CLI", &janitor, true));
+
+    let opencv_check = if python.exists() {
+        match Command::new(&python).arg("-c").arg("import cv2").output() {
+            Ok(output) if output.status.success() => PreflightCheck {
+                label: "OpenCV import".to_string(),
+                detail: "cv2 imports successfully in the janitor environment.".to_string(),
+                status: PreflightStatus::Pass,
+                required: true,
+            },
+            Ok(output) => PreflightCheck {
+                label: "OpenCV import".to_string(),
+                detail: format!(
+                    "cv2 failed to import: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .trim()
+                .to_string(),
+                status: PreflightStatus::Fail,
+                required: true,
+            },
+            Err(error) => PreflightCheck {
+                label: "OpenCV import".to_string(),
+                detail: format!("Could not run Python: {error}"),
+                status: PreflightStatus::Fail,
+                required: true,
+            },
+        }
+    } else {
+        PreflightCheck {
+            label: "OpenCV import".to_string(),
+            detail: "Python venv is missing, so cv2 cannot be checked.".to_string(),
+            status: PreflightStatus::Fail,
+            required: true,
+        }
+    };
+    checks.push(opencv_check);
+
+    checks.push(path_check("YOLO detector weights", &yolo, true));
+    checks.push(path_check("YOLO pose weights", &yolo_pose, true));
+    checks.push(path_check("MediaPipe pose model", &mediapipe, true));
+
+    for dir in upload_dirs {
+        checks.push(match check_writable_dir(&dir) {
+            Ok(()) => PreflightCheck {
+                label: format!("Writable {}", display_file_name(&dir)),
+                detail: format!("{} is writable.", dir.display()),
+                status: PreflightStatus::Pass,
+                required: true,
+            },
+            Err(error) => PreflightCheck {
+                label: format!("Writable {}", display_file_name(&dir)),
+                detail: error,
+                status: PreflightStatus::Fail,
+                required: true,
+            },
+        });
+    }
+
+    checks
+}
+
+fn path_check(label: &str, path: &Path, required: bool) -> PreflightCheck {
+    if path.exists() {
+        PreflightCheck {
+            label: label.to_string(),
+            detail: path.display().to_string(),
+            status: PreflightStatus::Pass,
+            required,
+        }
+    } else {
+        PreflightCheck {
+            label: label.to_string(),
+            detail: format!("Missing {}", path.display()),
+            status: if required {
+                PreflightStatus::Fail
+            } else {
+                PreflightStatus::Warn
+            },
+            required,
+        }
+    }
 }
 
 fn load_corpus_state(project_root: &Path) -> LoadedCorpus {
@@ -658,9 +889,10 @@ fn run_command(command: &mut Command) -> Result<String, String> {
 }
 
 fn parse_labeled_path(output: &str, prefix: &str) -> Option<PathBuf> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(prefix).map(|rest| PathBuf::from(rest.trim())))
+    output.lines().find_map(|line| {
+        line.strip_prefix(prefix)
+            .map(|rest| PathBuf::from(rest.trim()))
+    })
 }
 
 fn load_texture_from_path(
@@ -671,7 +903,12 @@ fn load_texture_from_path(
     let image = ImageReader::open(path)
         .map_err(|error| format!("Failed to open image {}: {error}", path.display()))?
         .with_guessed_format()
-        .map_err(|error| format!("Failed to guess image format for {}: {error}", path.display()))?
+        .map_err(|error| {
+            format!(
+                "Failed to guess image format for {}: {error}",
+                path.display()
+            )
+        })?
         .decode()
         .map_err(|error| format!("Failed to decode image {}: {error}", path.display()))?
         .to_rgba8();
@@ -741,8 +978,14 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     #[cfg(target_os = "linux")]
     {
         for (command, args) in [
-            ("zenity", vec!["--file-selection", "--title=Choose a jump-shot video"]),
-            ("kdialog", vec!["--getopenfilename", ".", "*.mp4 *.mov *.avi *.mkv *.m4v"]),
+            (
+                "zenity",
+                vec!["--file-selection", "--title=Choose a jump-shot video"],
+            ),
+            (
+                "kdialog",
+                vec!["--getopenfilename", ".", "*.mp4 *.mov *.avi *.mkv *.m4v"],
+            ),
         ] {
             let output = Command::new(command).args(args).output().ok()?;
             if output.status.success() {
@@ -767,12 +1010,19 @@ fn apply_dropped_file(ctx: &egui::Context, selected_clip_path: &mut String) {
 
 fn hero_header(ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
-        ui.label(RichText::new("JumpShot Trainer").size(40.0).strong().color(Color32::from_rgb(122, 20, 32)));
+        ui.label(
+            RichText::new("JumpShot Trainer")
+                .size(40.0)
+                .strong()
+                .color(Color32::from_rgb(122, 20, 32)),
+        );
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Drop in a clip, set up your profile, and get instant mechanical feedback.")
-                .size(18.0)
-                .color(Color32::from_rgb(111, 77, 82)),
+            RichText::new(
+                "Drop in a clip, set up your profile, and get instant mechanical feedback.",
+            )
+            .size(18.0)
+            .color(Color32::from_rgb(111, 77, 82)),
         );
     });
 }
@@ -795,12 +1045,24 @@ fn upload_panel(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp) {
     ui.add_space(18.0);
     ui.columns(2, |columns| {
         columns[0].vertical(|ui| {
-            ui.label(RichText::new("Video Setup").size(22.0).strong().color(Color32::from_rgb(93, 18, 30)));
+            ui.label(
+                RichText::new("Video Setup")
+                    .size(22.0)
+                    .strong()
+                    .color(Color32::from_rgb(93, 18, 30)),
+            );
             ui.add_space(8.0);
-            ui.label(RichText::new("Choose a video file and select the camera angle.").color(Color32::from_rgb(118, 98, 102)));
+            ui.label(
+                RichText::new("Choose a video file and select the camera angle.")
+                    .color(Color32::from_rgb(118, 98, 102)),
+            );
             ui.add_space(16.0);
             ui.label(RichText::new("Video Path").color(Color32::from_rgb(118, 98, 102)));
-            ui.add(egui::TextEdit::singleline(&mut app.selected_clip_path).hint_text("Absolute path...").desired_width(f32::INFINITY));
+            ui.add(
+                egui::TextEdit::singleline(&mut app.selected_clip_path)
+                    .hint_text("Absolute path...")
+                    .desired_width(f32::INFINITY),
+            );
             ui.add_space(10.0);
             if secondary_button(ui, "Choose File").clicked() {
                 if let Some(path) = choose_video_file() {
@@ -815,50 +1077,168 @@ fn upload_panel(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp) {
         });
 
         columns[1].vertical(|ui| {
-            ui.label(RichText::new("Athlete Form").size(22.0).strong().color(Color32::from_rgb(93, 18, 30)));
+            ui.label(
+                RichText::new("Athlete Form")
+                    .size(22.0)
+                    .strong()
+                    .color(Color32::from_rgb(93, 18, 30)),
+            );
             ui.add_space(8.0);
-            egui::Grid::new("athlete_profile_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label(RichText::new("Name").color(Color32::from_rgb(118, 98, 102)));
-                ui.add(egui::TextEdit::singleline(&mut app.athlete_name).desired_width(f32::INFINITY));
-                ui.end_row();
+            egui::Grid::new("athlete_profile_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Name").color(Color32::from_rgb(118, 98, 102)));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.athlete_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
 
-                ui.label(RichText::new("Height (m)").color(Color32::from_rgb(118, 98, 102)));
-                ui.add(egui::TextEdit::singleline(&mut app.athlete_height_m).desired_width(f32::INFINITY));
-                ui.end_row();
+                    ui.label(RichText::new("Height (m)").color(Color32::from_rgb(118, 98, 102)));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.athlete_height_m)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
 
-                ui.label(RichText::new("Wingspan (m)").color(Color32::from_rgb(118, 98, 102)));
-                ui.add(egui::TextEdit::singleline(&mut app.athlete_wingspan_m).desired_width(f32::INFINITY));
-                ui.end_row();
+                    ui.label(RichText::new("Wingspan (m)").color(Color32::from_rgb(118, 98, 102)));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.athlete_wingspan_m)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
 
-                ui.label(RichText::new("Reach (m)").color(Color32::from_rgb(118, 98, 102)));
-                ui.add(egui::TextEdit::singleline(&mut app.athlete_standing_reach_m).desired_width(f32::INFINITY));
-                ui.end_row();
+                    ui.label(RichText::new("Reach (m)").color(Color32::from_rgb(118, 98, 102)));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.athlete_standing_reach_m)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
 
-                ui.label(RichText::new("Handedness").color(Color32::from_rgb(118, 98, 102)));
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(app.athlete_handedness == "right", "Right").clicked() { app.athlete_handedness = "right".to_string(); }
-                    if ui.selectable_label(app.athlete_handedness == "left", "Left").clicked() { app.athlete_handedness = "left".to_string(); }
+                    ui.label(RichText::new("Handedness").color(Color32::from_rgb(118, 98, 102)));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(app.athlete_handedness == "right", "Right")
+                            .clicked()
+                        {
+                            app.athlete_handedness = "right".to_string();
+                        }
+                        if ui
+                            .selectable_label(app.athlete_handedness == "left", "Left")
+                            .clicked()
+                        {
+                            app.athlete_handedness = "left".to_string();
+                        }
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-            });
         });
     });
 
     ui.add_space(18.0);
+    preflight_panel(ui, app);
+
+    ui.add_space(18.0);
     ui.horizontal(|ui| {
-        let button_text = if app.is_processing { "Analyzing..." } else { "Analyze Video" };
-        if primary_button(ui, button_text).clicked() && !app.is_processing {
+        let button_text = if app.is_processing {
+            "Analyzing..."
+        } else {
+            "Analyze Video"
+        };
+        let can_analyze = !app.is_processing && preflight_ready(&app.preflight_checks);
+        if ui
+            .add_enabled_ui(can_analyze, |ui| primary_button(ui, button_text))
+            .inner
+            .clicked()
+        {
             app.start_analysis(ui.ctx());
         }
     });
 }
 
-fn processing_panel(ui: &mut egui::Ui, status_message: &str, preview_texture: Option<&TextureHandle>) {
+fn preflight_ready(checks: &[PreflightCheck]) -> bool {
+    checks
+        .iter()
+        .all(|check| !check.required || check.status != PreflightStatus::Fail)
+}
+
+fn preflight_panel(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp) {
+    let ready = preflight_ready(&app.preflight_checks);
+    egui::Frame::new()
+        .fill(Color32::from_rgb(255, 250, 250))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(237, 210, 214)))
+        .corner_radius(16.0)
+        .inner_margin(egui::Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new("Preflight")
+                            .size(20.0)
+                            .strong()
+                            .color(Color32::from_rgb(93, 18, 30)),
+                    );
+                    ui.label(
+                        RichText::new(if ready {
+                            "The local analysis environment is ready."
+                        } else {
+                            "Fix the missing setup items before running analysis."
+                        })
+                        .color(Color32::from_rgb(118, 98, 102)),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if secondary_button(ui, "Refresh").clicked() {
+                        app.preflight_checks = run_preflight_checks(&app.project_root);
+                    }
+                });
+            });
+
+            ui.add_space(10.0);
+            egui::Grid::new("preflight_grid")
+                .num_columns(3)
+                .spacing([12.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for check in &app.preflight_checks {
+                        let (status_text, color) = preflight_status_view(check.status);
+                        ui.label(RichText::new(status_text).strong().color(color));
+                        ui.label(RichText::new(&check.label).color(Color32::from_rgb(87, 49, 55)));
+                        ui.label(
+                            RichText::new(&check.detail)
+                                .size(13.0)
+                                .color(Color32::from_rgb(121, 99, 103)),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn preflight_status_view(status: PreflightStatus) -> (&'static str, Color32) {
+    match status {
+        PreflightStatus::Pass => ("Ready", Color32::from_rgb(29, 124, 75)),
+        PreflightStatus::Warn => ("Check", Color32::from_rgb(177, 104, 19)),
+        PreflightStatus::Fail => ("Missing", Color32::from_rgb(164, 28, 44)),
+    }
+}
+
+fn processing_panel(
+    ui: &mut egui::Ui,
+    status_message: &str,
+    preview_texture: Option<&TextureHandle>,
+) {
     ui.horizontal(|ui| {
         ui.add(egui::Spinner::new().size(22.0));
         ui.add_space(10.0);
         ui.vertical(|ui| {
-            ui.label(RichText::new("Running analysis").size(22.0).strong().color(Color32::from_rgb(122, 20, 32)));
+            ui.label(
+                RichText::new("Running analysis")
+                    .size(22.0)
+                    .strong()
+                    .color(Color32::from_rgb(122, 20, 32)),
+            );
             ui.label(RichText::new(status_message).color(Color32::from_rgb(118, 98, 102)));
         });
 
@@ -868,7 +1248,7 @@ fn processing_panel(ui: &mut egui::Ui, status_message: &str, preview_texture: Op
                 egui::Image::new(texture)
                     .maintain_aspect_ratio(true)
                     .fit_to_exact_size(egui::vec2(260.0, 180.0))
-                    .corner_radius(12.0)
+                    .corner_radius(12.0),
             );
         }
     });
@@ -876,7 +1256,12 @@ fn processing_panel(ui: &mut egui::Ui, status_message: &str, preview_texture: Op
 
 fn error_card(ui: &mut egui::Ui, message: &str) {
     shell_card(ui, |ui| {
-        ui.label(RichText::new("Analysis Error").size(20.0).strong().color(Color32::from_rgb(164, 28, 44)));
+        ui.label(
+            RichText::new("Analysis Error")
+                .size(20.0)
+                .strong()
+                .color(Color32::from_rgb(164, 28, 44)),
+        );
         ui.add_space(6.0);
         ui.label(RichText::new(message).color(Color32::from_rgb(130, 71, 80)));
     });
@@ -889,7 +1274,12 @@ fn analysis_overview(
     snapshot: &TrainerSnapshot,
     preview_texture: Option<&TextureHandle>,
 ) {
-    ui.label(RichText::new("Shot Analysis").size(30.0).strong().color(Color32::from_rgb(93, 18, 30)));
+    ui.label(
+        RichText::new("Shot Analysis")
+            .size(30.0)
+            .strong()
+            .color(Color32::from_rgb(93, 18, 30)),
+    );
     ui.label(
         RichText::new(format!(
             "{} • {} detected shots • {}",
@@ -910,7 +1300,10 @@ fn analysis_overview(
                 .corner_radius(18.0),
         );
     } else {
-        ui.label(RichText::new("Preview snapshot unavailable for this clip.").color(Color32::from_rgb(121, 99, 103)));
+        ui.label(
+            RichText::new("Preview snapshot unavailable for this clip.")
+                .color(Color32::from_rgb(121, 99, 103)),
+        );
     }
 
     ui.add_space(14.0);
@@ -927,7 +1320,11 @@ fn analysis_overview(
             stat_card(
                 ui,
                 "Selected Shot",
-                &format!("{} / {}", selected_shot_index + 1, result.shot_records.len()),
+                &format!(
+                    "{} / {}",
+                    selected_shot_index + 1,
+                    result.shot_records.len()
+                ),
                 "Switch reps below to compare mechanics against a visual baseline.",
             );
         });
@@ -942,11 +1339,18 @@ fn analysis_overview(
 }
 
 fn shot_selector(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp, result: &AnalysisRunResult) {
-    ui.label(RichText::new("Pick The Rep To Review").size(22.0).strong().color(Color32::from_rgb(93, 18, 30)));
+    ui.label(
+        RichText::new("Pick The Rep To Review")
+            .size(22.0)
+            .strong()
+            .color(Color32::from_rgb(93, 18, 30)),
+    );
     ui.add_space(8.0);
     ui.label(
-        RichText::new("Each detected shot can be selected below. The coaching cards update instantly.")
-            .color(Color32::from_rgb(118, 98, 102)),
+        RichText::new(
+            "Each detected shot can be selected below. The coaching cards update instantly.",
+        )
+        .color(Color32::from_rgb(118, 98, 102)),
     );
     ui.add_space(12.0);
 
@@ -954,7 +1358,11 @@ fn shot_selector(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp, result: &Analy
         ui.horizontal(|ui| {
             for (index, record) in result.shot_records.iter().enumerate() {
                 let selected = app.selected_shot_index == index;
-                let label = format!("Shot {} • {:.0} ms", index + 1, record.release_timing_ms.unwrap_or(0.0));
+                let label = format!(
+                    "Shot {} • {:.0} ms",
+                    index + 1,
+                    record.release_timing_ms.unwrap_or(0.0)
+                );
                 let fill = if selected {
                     Color32::from_rgb(188, 31, 53)
                 } else {
@@ -976,13 +1384,11 @@ fn shot_selector(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp, result: &Analy
                         }),
                     )
                 } else {
-                    egui::Button::new(
-                        RichText::new(label).color(if selected {
-                            Color32::from_rgb(255, 250, 250)
-                        } else {
-                            Color32::from_rgb(108, 48, 56)
-                        }),
-                    )
+                    egui::Button::new(RichText::new(label).color(if selected {
+                        Color32::from_rgb(255, 250, 250)
+                    } else {
+                        Color32::from_rgb(108, 48, 56)
+                    }))
                 };
 
                 button = button
@@ -990,8 +1396,7 @@ fn shot_selector(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp, result: &Analy
                     .corner_radius(12.0)
                     .stroke(Stroke::new(1.0, Color32::from_rgb(226, 187, 192)));
 
-                if ui.add_sized([240.0, 112.0], button).clicked()
-                {
+                if ui.add_sized([240.0, 112.0], button).clicked() {
                     app.selected_shot_index = index;
                     if let Err(error) = app.refresh_release_image(ui.ctx()) {
                         eprintln!("Release snapshot extraction failed: {error}");
@@ -1013,7 +1418,12 @@ fn shot_selector(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp, result: &Analy
 }
 
 fn adjustments_panel(ui: &mut egui::Ui, snapshot: &TrainerSnapshot) {
-    ui.label(RichText::new("What To Adjust").size(22.0).strong().color(Color32::from_rgb(93, 18, 30)));
+    ui.label(
+        RichText::new("What To Adjust")
+            .size(22.0)
+            .strong()
+            .color(Color32::from_rgb(93, 18, 30)),
+    );
     ui.add_space(8.0);
     for (title, body) in coaching_actions(snapshot).into_iter().take(3) {
         advice_card(ui, &title, &body);
@@ -1022,28 +1432,74 @@ fn adjustments_panel(ui: &mut egui::Ui, snapshot: &TrainerSnapshot) {
 }
 
 fn metric_summary(ui: &mut egui::Ui, input: &ShotInput, snapshot: &TrainerSnapshot) {
-    ui.label(RichText::new("Mechanical Snapshot").size(22.0).strong().color(Color32::from_rgb(93, 18, 30)));
+    ui.label(
+        RichText::new("Mechanical Snapshot")
+            .size(22.0)
+            .strong()
+            .color(Color32::from_rgb(93, 18, 30)),
+    );
     ui.add_space(10.0);
 
     ui.columns(2, |columns| {
-        stat_card_compact(&mut columns[0], "Prototype", snapshot.inference.nearest_neighbor.as_str());
-        stat_card_compact(&mut columns[1], "Elbow Flare", &format!("{:.1}°", input.elbow_flare));
-        stat_card_compact(&mut columns[0], "Forearm", &format!("{:.1}°", input.forearm_verticality));
-        stat_card_compact(&mut columns[1], "Release Timing", &format!("{:.0} ms", input.release_timing_ms));
-        stat_card_compact(&mut columns[0], "Release Height", &format!("{:.2}x", input.release_height_ratio));
-        stat_card_compact(&mut columns[1], "Knee Load", &format!("{:.1}°", input.knee_load));
-        stat_card_compact(&mut columns[0], "Jump Height", &format!("{:.2} m", input.jump_height));
+        stat_card_compact(
+            &mut columns[0],
+            "Prototype",
+            snapshot.inference.nearest_neighbor.as_str(),
+        );
+        stat_card_compact(
+            &mut columns[1],
+            "Elbow Flare",
+            &format!("{:.1}°", input.elbow_flare),
+        );
+        stat_card_compact(
+            &mut columns[0],
+            "Forearm",
+            &format!("{:.1}°", input.forearm_verticality),
+        );
+        stat_card_compact(
+            &mut columns[1],
+            "Release Timing",
+            &format!("{:.0} ms", input.release_timing_ms),
+        );
+        stat_card_compact(
+            &mut columns[0],
+            "Release Height",
+            &format!("{:.2}x", input.release_height_ratio),
+        );
+        stat_card_compact(
+            &mut columns[1],
+            "Knee Load",
+            &format!("{:.1}°", input.knee_load),
+        );
+        stat_card_compact(
+            &mut columns[0],
+            "Jump Height",
+            &format!("{:.2} m", input.jump_height),
+        );
     });
 
     ui.add_space(10.0);
     ui.label(RichText::new("Quick model cue").color(Color32::from_rgb(118, 98, 102)));
     if let Some(feedback) = snapshot.inference.feedback.first() {
-        ui.label(RichText::new(feedback).size(16.0).color(Color32::from_rgb(87, 49, 55)));
+        ui.label(
+            RichText::new(feedback)
+                .size(16.0)
+                .color(Color32::from_rgb(87, 49, 55)),
+        );
     }
 }
 
-fn stage_panel(ui: &mut egui::Ui, stages: &[StageFeedback], release_texture: Option<&TextureHandle>) {
-    ui.label(RichText::new("Shot Phases").size(22.0).strong().color(Color32::from_rgb(93, 18, 30)));
+fn stage_panel(
+    ui: &mut egui::Ui,
+    stages: &[StageFeedback],
+    release_texture: Option<&TextureHandle>,
+) {
+    ui.label(
+        RichText::new("Shot Phases")
+            .size(22.0)
+            .strong()
+            .color(Color32::from_rgb(93, 18, 30)),
+    );
     ui.add_space(10.0);
     for stage in stages {
         stage_row(ui, stage);
@@ -1052,10 +1508,17 @@ fn stage_panel(ui: &mut egui::Ui, stages: &[StageFeedback], release_texture: Opt
 
     if let Some(texture) = release_texture {
         ui.add_space(8.0);
-        ui.label(RichText::new("Release Snapshot").size(18.0).strong().color(Color32::from_rgb(93, 18, 30)));
         ui.label(
-            RichText::new("The extracted release frame gives the coaching notes a concrete visual anchor.")
-                .color(Color32::from_rgb(118, 98, 102)),
+            RichText::new("Release Snapshot")
+                .size(18.0)
+                .strong()
+                .color(Color32::from_rgb(93, 18, 30)),
+        );
+        ui.label(
+            RichText::new(
+                "The extracted release frame gives the coaching notes a concrete visual anchor.",
+            )
+            .color(Color32::from_rgb(118, 98, 102)),
         );
         ui.add_space(8.0);
         ui.add(
@@ -1074,7 +1537,12 @@ fn overlay_panel(
     stage_feedback: &[StageFeedback],
     calibration: &CalibrationInput,
 ) {
-    ui.label(RichText::new("Visual Review").size(22.0).strong().color(Color32::from_rgb(93, 18, 30)));
+    ui.label(
+        RichText::new("Visual Review")
+            .size(22.0)
+            .strong()
+            .color(Color32::from_rgb(93, 18, 30)),
+    );
     ui.add_space(6.0);
     ui.label(
         RichText::new(format!(
@@ -1117,7 +1585,10 @@ fn engine_footer(ui: &mut egui::Ui, app: &mut JumpshotTrainerApp) {
             ));
             if let Some(result) = &app.analysis_result {
                 ui.add_space(6.0);
-                ui.label(format!("Latest processed session: {}", result.session_json.display()));
+                ui.label(format!(
+                    "Latest processed session: {}",
+                    result.session_json.display()
+                ));
             }
         });
     }
@@ -1128,11 +1599,19 @@ fn coaching_actions(snapshot: &TrainerSnapshot) -> Vec<(String, String)> {
     issues.sort_by(|a, b| {
         severity_rank(b.severity)
             .cmp(&severity_rank(a.severity))
-            .then_with(|| b.delta.abs().partial_cmp(&a.delta.abs()).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.delta
+                    .abs()
+                    .partial_cmp(&a.delta.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     let mut actions = Vec::new();
-    for issue in issues.into_iter().filter(|issue| issue.severity != DiagnosticSeverity::Optimal) {
+    for issue in issues
+        .into_iter()
+        .filter(|issue| issue.severity != DiagnosticSeverity::Optimal)
+    {
         let body = match issue.metric.as_str() {
             "Elbow Flare" => "Keep the shooting elbow tucked closer to your shot line so the release stays compact.".to_string(),
             "Forearm Verticality" => "Get the wrist stacked over the elbow earlier so the forearm stays more vertical at the set point.".to_string(),
@@ -1234,9 +1713,9 @@ fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
                 .strong()
                 .color(Color32::from_rgb(255, 249, 249)),
         )
-            .fill(Color32::from_rgb(193, 35, 57))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(146, 23, 40)))
-            .corner_radius(16.0),
+        .fill(Color32::from_rgb(193, 35, 57))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(146, 23, 40)))
+        .corner_radius(16.0),
     )
 }
 
@@ -1263,17 +1742,14 @@ fn toggle_chip(ui: &mut egui::Ui, selected_view: &mut ClipView, option: ClipView
     };
     if ui
         .add(
-            egui::Button::new(
-                RichText::new(option.label())
-                    .color(if selected {
-                        Color32::from_rgb(255, 249, 249)
-                    } else {
-                        Color32::from_rgb(108, 48, 56)
-                    }),
-            )
-                .fill(fill)
-                .corner_radius(999.0)
-                .stroke(Stroke::new(1.0, Color32::from_rgb(226, 187, 192))),
+            egui::Button::new(RichText::new(option.label()).color(if selected {
+                Color32::from_rgb(255, 249, 249)
+            } else {
+                Color32::from_rgb(108, 48, 56)
+            }))
+            .fill(fill)
+            .corner_radius(999.0)
+            .stroke(Stroke::new(1.0, Color32::from_rgb(226, 187, 192))),
         )
         .clicked()
     {
@@ -1291,9 +1767,18 @@ fn stat_card(ui: &mut egui::Ui, title: &str, value: &str, caption: &str) {
             ui.set_min_height(128.0);
             ui.label(RichText::new(title).color(Color32::from_rgb(141, 87, 95)));
             ui.add_space(8.0);
-            ui.label(RichText::new(value).size(28.0).strong().color(Color32::from_rgb(93, 18, 30)));
+            ui.label(
+                RichText::new(value)
+                    .size(28.0)
+                    .strong()
+                    .color(Color32::from_rgb(93, 18, 30)),
+            );
             ui.add_space(10.0);
-            ui.label(RichText::new(caption).size(14.0).color(Color32::from_rgb(121, 99, 103)));
+            ui.label(
+                RichText::new(caption)
+                    .size(14.0)
+                    .color(Color32::from_rgb(121, 99, 103)),
+            );
         });
 }
 
@@ -1305,9 +1790,18 @@ fn stat_card_compact(ui: &mut egui::Ui, title: &str, value: &str) {
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_min_height(84.0);
-            ui.label(RichText::new(title).size(12.0).color(Color32::from_rgb(141, 87, 95)));
+            ui.label(
+                RichText::new(title)
+                    .size(12.0)
+                    .color(Color32::from_rgb(141, 87, 95)),
+            );
             ui.add_space(4.0);
-            ui.label(RichText::new(value).size(22.0).strong().color(Color32::from_rgb(87, 49, 55)));
+            ui.label(
+                RichText::new(value)
+                    .size(22.0)
+                    .strong()
+                    .color(Color32::from_rgb(87, 49, 55)),
+            );
         });
 }
 
@@ -1318,7 +1812,12 @@ fn advice_card(ui: &mut egui::Ui, title: &str, body: &str) {
         .stroke(Stroke::new(1.0, Color32::from_rgb(236, 198, 204)))
         .inner_margin(egui::Margin::symmetric(16, 14))
         .show(ui, |ui| {
-            ui.label(RichText::new(title).size(18.0).strong().color(Color32::from_rgb(122, 20, 32)));
+            ui.label(
+                RichText::new(title)
+                    .size(18.0)
+                    .strong()
+                    .color(Color32::from_rgb(122, 20, 32)),
+            );
             ui.add_space(6.0);
             ui.label(RichText::new(body).color(Color32::from_rgb(110, 79, 84)));
         });
@@ -1348,7 +1847,9 @@ fn stage_row(ui: &mut egui::Ui, stage: &StageFeedback) {
                 });
             });
             ui.add_space(6.0);
-            ui.label(RichText::new(stage.coaching_note.as_str()).color(Color32::from_rgb(110, 79, 84)));
+            ui.label(
+                RichText::new(stage.coaching_note.as_str()).color(Color32::from_rgb(110, 79, 84)),
+            );
         });
 }
 
@@ -1373,31 +1874,53 @@ fn draw_overlay_review(ui: &mut egui::Ui, input: &ShotInput, stages: &[StageFeed
     let release_color = stage_color_from_feedback(stages, ShotStage::Release);
 
     painter.line_segment(
-        [egui::pos2(center_x, shoulder_y), egui::pos2(center_x, hip_y)],
+        [
+            egui::pos2(center_x, shoulder_y),
+            egui::pos2(center_x, hip_y),
+        ],
         Stroke::new(7.0, Color32::from_rgb(235, 201, 153)),
     );
     painter.line_segment(
-        [egui::pos2(center_x, hip_y), egui::pos2(knee_x, floor_y - 44.0)],
+        [
+            egui::pos2(center_x, hip_y),
+            egui::pos2(knee_x, floor_y - 44.0),
+        ],
         Stroke::new(7.0, load_color),
     );
     painter.line_segment(
-        [egui::pos2(knee_x, floor_y - 44.0), egui::pos2(ankle_x, floor_y)],
+        [
+            egui::pos2(knee_x, floor_y - 44.0),
+            egui::pos2(ankle_x, floor_y),
+        ],
         Stroke::new(7.0, load_color),
     );
     painter.line_segment(
-        [egui::pos2(center_x, shoulder_y), egui::pos2(elbow_x, shoulder_y + 34.0)],
+        [
+            egui::pos2(center_x, shoulder_y),
+            egui::pos2(elbow_x, shoulder_y + 34.0),
+        ],
         Stroke::new(7.0, set_color),
     );
     painter.line_segment(
-        [egui::pos2(elbow_x, shoulder_y + 34.0), egui::pos2(wrist_x, wrist_y)],
+        [
+            egui::pos2(elbow_x, shoulder_y + 34.0),
+            egui::pos2(wrist_x, wrist_y),
+        ],
         Stroke::new(7.0, release_color),
     );
 
     painter.line_segment(
-        [egui::pos2(center_x, shoulder_y - 34.0), egui::pos2(center_x + 2.0, shoulder_y - 6.0)],
+        [
+            egui::pos2(center_x, shoulder_y - 34.0),
+            egui::pos2(center_x + 2.0, shoulder_y - 6.0),
+        ],
         Stroke::new(7.0, Color32::from_rgb(235, 201, 153)),
     );
-    painter.circle_filled(egui::pos2(center_x, shoulder_y - 52.0), 18.0, Color32::from_rgb(248, 226, 186));
+    painter.circle_filled(
+        egui::pos2(center_x, shoulder_y - 52.0),
+        18.0,
+        Color32::from_rgb(248, 226, 186),
+    );
 
     painter.text(
         rect.left_top() + egui::vec2(18.0, 16.0),
